@@ -15,20 +15,20 @@ import (
 // Message is the structure sent between server and clients.
 type Message struct {
 	Username string `json:"username"`
-	Text     string `json:"text"`
+	Text     string `json:"text"`
 }
 
 const (
-	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingPeriod     = (pongWait * 9) / 10 // must be less than pongWait
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10 // must be less than pongWait
 	broadcastQueue = 100
 )
 
 // Hub keeps track of all connected clients and broadcasts messages.
 type Hub struct {
-	mu        sync.Mutex
-	clients   map[*websocket.Conn]bool
+	mu        sync.Mutex
+	clients   map[*websocket.Conn]bool
 	broadcast chan Message
 }
 
@@ -38,7 +38,7 @@ var upgrader = websocket.Upgrader{
 
 func newHub() *Hub {
 	return &Hub{
-		clients:   make(map[*websocket.Conn]bool),
+		clients:   make(map[*websocket.Conn]bool),
 		broadcast: make(chan Message, broadcastQueue),
 	}
 }
