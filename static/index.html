@@ -70,9 +70,34 @@
             color: #0066cc;
         }
 
-        .system {
-            color: #888;
+        .edited-tag {
+            font-size: 0.75em;
+            color: #999;
             font-style: italic;
+            margin-left: 4px;
+        }
+
+        .edit-btn {
+            margin-left: 6px;
+            font-size: 0.75em;
+            padding: 2px 6px;
+            background: #eee;
+            color: #333;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .edit-btn:active {
+            background: #ddd;
+        }
+
+        .edit-input {
+            font-size: 14px;
+            padding: 3px 6px;
+            border: 1px solid #0066cc;
+            border-radius: 4px;
+            width: 70%;
         }
 
         #inputRow {
@@ -162,6 +187,7 @@
     <script>
         let ws;
         let username = '';
+        let editingId = null; // only one message editable at a time
 
         function joinChat() {
             const name = document.getElementById('nameInput').value.trim();
@@ -179,6 +205,7 @@
 
             ws.onopen = function() {
                 setStatus('Connected', '#2a2');
+                ws.send(JSON.stringify({ type: 'join', username: username }));
             };
 
             ws.onmessage = function(e) {
@@ -188,7 +215,15 @@
                 } catch (err) {
                     return; // ignore malformed payloads
                 }
-                addMessage(msg.username, msg.text);
+
+                if (msg.type === 'history') {
+                    document.getElementById('messages').innerHTML = '';
+                    (msg.history || []).forEach(addMessage);
+                } else if (msg.type === 'message') {
+                    addMessage(msg);
+                } else if (msg.type === 'edit') {
+                    updateMessage(msg);
+                }
             };
 
             ws.onclose = function() {
@@ -217,29 +252,101 @@
                 return;
             }
 
-            ws.send(JSON.stringify({ username: username, text: text }));
+            ws.send(JSON.stringify({ type: 'message', text: text }));
             input.value = '';
             input.focus();
         }
 
-        // Builds message DOM nodes directly (textContent, not innerHTML) so
-        // usernames/messages can never be interpreted as HTML/script.
-        function addMessage(user, text) {
+        // Renders one message. All text goes through textContent (never
+        // innerHTML) so a username or message body can never be interpreted
+        // as HTML/script.
+        function addMessage(m) {
             const div = document.createElement('div');
             div.className = 'msg';
+            div.dataset.id = m.id;
+            div.dataset.username = m.username;
 
             const userSpan = document.createElement('span');
             userSpan.className = 'username';
-            userSpan.textContent = user + ': ';
+            userSpan.textContent = m.username + ': ';
 
-            const textNode = document.createTextNode(text);
+            const textSpan = document.createElement('span');
+            textSpan.className = 'text';
+            textSpan.textContent = m.text;
 
             div.appendChild(userSpan);
-            div.appendChild(textNode);
+            div.appendChild(textSpan);
+
+            if (m.username === username) {
+                const editBtn = document.createElement('button');
+                editBtn.className = 'edit-btn';
+                editBtn.type = 'button';
+                editBtn.textContent = 'Edit';
+                editBtn.onclick = function() { startEdit(div, m.id, textSpan); };
+                div.appendChild(editBtn);
+            }
 
             const messages = document.getElementById('messages');
             messages.appendChild(div);
             messages.scrollTop = messages.scrollHeight;
+        }
+
+        // Swaps a message's text span for an inline input. Enter saves,
+        // Escape cancels, and blur saves (so tapping away on mobile doesn't
+        // lose the edit).
+        function startEdit(div, id, textSpan) {
+            if (editingId !== null) return; // one edit in flight at a time
+            editingId = id;
+
+            const original = textSpan.textContent;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'edit-input';
+            input.maxLength = 1000;
+            input.value = original;
+
+            textSpan.replaceWith(input);
+            input.focus();
+            input.select();
+
+            let finished = false;
+            function finish(save) {
+                if (finished) return;
+                finished = true;
+                editingId = null;
+
+                const newValue = input.value.trim();
+                const newSpan = document.createElement('span');
+                newSpan.className = 'text';
+                newSpan.textContent = (save && newValue) ? newValue : original;
+                input.replaceWith(newSpan);
+
+                if (save && newValue && newValue !== original) {
+                    ws.send(JSON.stringify({ type: 'edit', id: id, text: newValue }));
+                }
+            }
+
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') finish(true);
+                if (e.key === 'Escape') finish(false);
+            });
+            input.addEventListener('blur', function() { finish(true); });
+        }
+
+        // Applies a broadcasted edit to the matching message already on screen.
+        function updateMessage(m) {
+            const div = document.querySelector('.msg[data-id="' + m.id + '"]');
+            if (!div) return;
+
+            const textSpan = div.querySelector('.text');
+            if (textSpan) textSpan.textContent = m.text;
+
+            if (!div.querySelector('.edited-tag')) {
+                const tag = document.createElement('span');
+                tag.className = 'edited-tag';
+                tag.textContent = '(edited)';
+                div.appendChild(tag);
+            }
         }
     </script>
 </body>

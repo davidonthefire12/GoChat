@@ -12,112 +12,250 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Message is the structure sent between server and clients.
+// Message is exchanged between server and clients over the websocket.
+// Type distinguishes the different kinds of payload:
+//
+//	"join"    - client -> server, first message on connect, announces the username
+//	"history" - server -> client only, sent once right after join
+//	"message" - both directions: client sends a new message with no ID;
+//	            server assigns ID/timestamp and broadcasts it to everyone
+//	"edit"    - both directions: client asks to edit an existing message by ID;
+//	            server checks the requester is the original author, then broadcasts it
 type Message struct {
-	Username string `json:"username"`
-	Text     string `json:"text"`
+	Type      string    `json:"type"`
+	ID        int64     `json:"id,omitempty"`
+	Username  string    `json:"username,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	Timestamp int64     `json:"ts,omitempty"`
+	History   []Message `json:"history,omitempty"`
 }
 
 const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10 // must be less than pongWait
-	broadcastQueue = 100
+	maxHistory     = 200                 // oldest messages are dropped beyond this
+	sendBufferSize = 16
 )
 
-// Hub keeps track of all connected clients and broadcasts messages.
+// Client represents one connected websocket connection.
+// Every write to conn goes through the send channel and is handled by a
+// single writePump goroutine per client, so broadcasts, pings, and the
+// initial history push never race on the same connection.
+type Client struct {
+	conn     *websocket.Conn
+	send     chan Message
+	username string
+}
+
+// Hub owns all shared state: connected clients and message history.
 type Hub struct {
-	mu        sync.Mutex
-	clients   map[*websocket.Conn]bool
-	broadcast chan Message
+	mu      sync.Mutex
+	clients map[*Client]bool
+	history []Message
+	nextID  int64
 }
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // allow LAN clients
+	CheckOrigin: func(r *http.Request) bool { return true }, // allow LAN/public clients
 }
 
 func newHub() *Hub {
-	return &Hub{
-		clients:   make(map[*websocket.Conn]bool),
-		broadcast: make(chan Message, broadcastQueue),
+	return &Hub{clients: make(map[*Client]bool)}
+}
+
+func (h *Hub) addClient(c *Client) {
+	h.mu.Lock()
+	h.clients[c] = true
+	h.mu.Unlock()
+}
+
+// removeClient deletes c from the client set and closes its send channel,
+// but only the first time it's called for a given client - this makes it
+// safe to call from both the normal disconnect path and the "buffer full,
+// drop this client" path without ever double-closing the channel.
+func (h *Hub) removeClient(c *Client) {
+	h.mu.Lock()
+	_, present := h.clients[c]
+	if present {
+		delete(h.clients, c)
+	}
+	h.mu.Unlock()
+	if present {
+		close(c.send)
 	}
 }
 
-func (h *Hub) addClient(ws *websocket.Conn) {
+// snapshot returns a copy of the current history, safe to hand to a new client.
+func (h *Hub) snapshot() []Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.clients[ws] = true
+	out := make([]Message, len(h.history))
+	copy(out, h.history)
+	return out
 }
 
-func (h *Hub) removeClient(ws *websocket.Conn) {
+// addMessage assigns an ID/timestamp, appends to history (trimmed to
+// maxHistory), and returns the stored copy.
+func (h *Hub) addMessage(username, text string) Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.clients, ws)
+	h.nextID++
+	msg := Message{
+		Type:      "message",
+		ID:        h.nextID,
+		Username:  username,
+		Text:      text,
+		Timestamp: time.Now().Unix(),
+	}
+	h.history = append(h.history, msg)
+	if len(h.history) > maxHistory {
+		h.history = h.history[len(h.history)-maxHistory:]
+	}
+	return msg
 }
 
-// run listens for new messages and sends them to every connected client.
-// Each write gets a deadline so one slow/dead client can't stall the
-// whole broadcast loop while the lock is held.
-func (h *Hub) run() {
-	for msg := range h.broadcast {
-		h.mu.Lock()
-		for client := range h.clients {
-			client.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := client.WriteJSON(msg); err != nil {
-				log.Printf("write error, dropping client %s: %v", client.RemoteAddr(), err)
-				client.Close()
-				delete(h.clients, client)
+// applyEdit updates an existing message's text, but only if username
+// matches the message's original author. Returns the updated message and
+// whether the edit was allowed.
+func (h *Hub) applyEdit(id int64, username, text string) (Message, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.history {
+		if h.history[i].ID == id {
+			if h.history[i].Username != username {
+				return Message{}, false
+			}
+			h.history[i].Text = text
+			h.history[i].Timestamp = time.Now().Unix()
+			return h.history[i], true
+		}
+	}
+	return Message{}, false
+}
+
+// broadcast queues msg for every connected client. A client whose buffer
+// is already full is treated as stuck: it's dropped and its connection is
+// closed, which unwinds cleanly through that client's own readPump/removeClient.
+func (h *Hub) broadcast(msg Message) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		select {
+		case c.send <- msg:
+		default:
+			log.Printf("client %s send buffer full, dropping", c.conn.RemoteAddr())
+			delete(h.clients, c)
+			c.conn.Close()
+		}
+	}
+}
+
+// writePump owns every write to the underlying connection: broadcast
+// messages, the initial history push, and periodic pings. Nothing else
+// should ever call c.conn.WriteJSON/WriteMessage directly.
+func (c *Client) writePump() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
+
+	for {
+		select {
+		case msg, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := c.conn.WriteJSON(msg); err != nil {
+				return
+			}
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
 			}
 		}
-		h.mu.Unlock()
 	}
 }
 
-// writePump sends periodic pings so dead connections (e.g. a client that
-// vanished without closing cleanly) get detected instead of hanging forever.
-func writePump(ws *websocket.Conn) {
-	ticker := time.NewTicker(pingPeriod)
-	defer ticker.Stop()
-	for range ticker.C {
-		ws.SetWriteDeadline(time.Now().Add(writeWait))
-		if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
-			return
+// readPump reads incoming messages from this client and acts on them.
+func (c *Client) readPump(hub *Hub) {
+	defer func() {
+		hub.removeClient(c)
+		log.Printf("Client disconnected: %s (%s)", c.conn.RemoteAddr(), c.username)
+	}()
+
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	for {
+		var in Message
+		if err := c.conn.ReadJSON(&in); err != nil {
+			break
+		}
+
+		switch in.Type {
+		case "message":
+			if in.Text == "" {
+				continue
+			}
+			msg := hub.addMessage(c.username, in.Text)
+			hub.broadcast(msg)
+
+		case "edit":
+			if in.Text == "" {
+				continue
+			}
+			updated, ok := hub.applyEdit(in.ID, c.username, in.Text)
+			if !ok {
+				continue // no such message, or requester isn't the author - ignore
+			}
+			updated.Type = "edit"
+			hub.broadcast(updated)
+
+		default:
+			// unknown/legacy message type, ignore
 		}
 	}
 }
 
-// handleConnections upgrades HTTP to WebSocket and reads incoming messages.
+// handleConnections upgrades HTTP to WebSocket, expects a "join" as the
+// first frame, then hands off to the read/write pumps.
 func handleConnections(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("upgrade error:", err)
 		return
 	}
-	defer ws.Close()
 
-	ws.SetReadDeadline(time.Now().Add(pongWait))
-	ws.SetPongHandler(func(string) error {
-		ws.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
-	})
-
-	hub.addClient(ws)
-	log.Printf("Client connected: %s", ws.RemoteAddr())
-
-	go writePump(ws)
-
-	defer func() {
-		hub.removeClient(ws)
-		log.Printf("Client disconnected: %s", ws.RemoteAddr())
-	}()
-
-	for {
-		var msg Message
-		if err := ws.ReadJSON(&msg); err != nil {
-			break
-		}
-		hub.broadcast <- msg
+	var join Message
+	if err := ws.ReadJSON(&join); err != nil || join.Type != "join" || join.Username == "" {
+		ws.Close()
+		return
 	}
+
+	client := &Client{
+		conn:     ws,
+		send:     make(chan Message, sendBufferSize),
+		username: join.Username,
+	}
+
+	hub.addClient(client)
+	log.Printf("Client connected: %s (%s)", ws.RemoteAddr(), client.username)
+
+	go client.writePump()
+
+	// Push history to this client only, via its own send channel so it's
+	// serialized with everything else written to this connection.
+	client.send <- Message{Type: "history", History: hub.snapshot()}
+
+	client.readPump(hub)
 }
 
 // getLocalIP automatically detects this PC's LAN IP address.
@@ -132,9 +270,8 @@ func getLocalIP() string {
 
 func main() {
 	hub := newHub()
-	go hub.run()
 
-	// Static route — serves files from the ./static folder at "/"
+	// Static route - serves files from the ./static folder at "/"
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/", fs)
 
