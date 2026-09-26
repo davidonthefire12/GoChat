@@ -1,17 +1,146 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>LAN Chat</title>
     <style>
-        body { font-family: Arial; max-width: 600px; margin: 30px auto; }
-        #messages { height: 400px; overflow-y: auto; border: 1px solid #ccc;
-                    padding: 10px; margin-bottom: 10px; border-radius: 5px; }
-        .msg { margin-bottom: 6px; word-wrap: break-word; }
-        .username { font-weight: bold; color: #0066cc; }
-        .system { color: #888; font-style: italic; }
-        input[type=text] { width: 75%; padding: 8px; }
-        button { padding: 8px 15px; }
-        #status { font-size: 0.85em; color: #888; margin-bottom: 8px; }
+        * { box-sizing: border-box; }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            max-width: 600px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 20px;
+            padding-top: max(20px, env(safe-area-inset-top));
+            padding-bottom: max(20px, env(safe-area-inset-bottom));
+        }
+
+        h2 {
+            margin: 0 0 16px 0;
+            font-size: 1.4em;
+        }
+
+        #join {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        #join input {
+            flex: 1;
+            min-width: 150px;
+        }
+
+        #chat {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-height: 0;
+        }
+
+        #messages {
+            flex: 1;
+            min-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .msg {
+            margin-bottom: 8px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            line-height: 1.4;
+        }
+
+        .username {
+            font-weight: bold;
+            color: #0066cc;
+        }
+
+        .system {
+            color: #888;
+            font-style: italic;
+        }
+
+        #inputRow {
+            display: flex;
+            gap: 8px;
+        }
+
+        input[type=text] {
+            padding: 10px;
+            font-size: 16px; /* prevents iOS auto-zoom on focus */
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        #msgInput {
+            flex: 1;
+            min-width: 0;
+        }
+
+        button {
+            padding: 10px 16px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            background: #0066cc;
+            color: #fff;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        button:active {
+            background: #004c99;
+        }
+
+        #status {
+            font-size: 0.85em;
+            color: #888;
+            margin-bottom: 8px;
+            min-height: 1.2em;
+        }
+
+        /* Small phones: use full height, drop side margins */
+        @media (max-width: 480px) {
+            body {
+                padding: 12px;
+                padding-top: max(12px, env(safe-area-inset-top));
+                padding-bottom: max(12px, env(safe-area-inset-bottom));
+                height: 100vh;
+                height: 100dvh; /* accounts for mobile browser chrome */
+            }
+
+            h2 {
+                font-size: 1.2em;
+                text-align: center;
+            }
+
+            #join {
+                flex-direction: column;
+            }
+
+            #join button {
+                width: 100%;
+            }
+
+            button {
+                padding: 12px 16px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -24,9 +153,11 @@
     <div id="chat" style="display:none;">
         <div id="status"></div>
         <div id="messages"></div>
-        <input type="text" id="msgInput" placeholder="Type message..." maxlength="1000"
-               onkeydown="if(event.key==='Enter') sendMessage()" />
-        <button onclick="sendMessage()">Send</button>
+        <div id="inputRow">
+            <input type="text" id="msgInput" placeholder="Type message..." maxlength="1000"
+                   onkeydown="if(event.key==='Enter') sendMessage()" />
+            <button onclick="sendMessage()">Send</button>
+        </div>
     </div>
     <script>
         let ws;
@@ -38,7 +169,7 @@
             username = name;
 
             document.getElementById('join').style.display = 'none';
-            document.getElementById('chat').style.display = 'block';
+            document.getElementById('chat').style.display = 'flex';
             connect();
         }
 
@@ -88,6 +219,7 @@
 
             ws.send(JSON.stringify({ username: username, text: text }));
             input.value = '';
+            input.focus();
         }
 
         // Builds message DOM nodes directly (textContent, not innerHTML) so
