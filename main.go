@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,12 +16,15 @@ import (
 // Message is exchanged between server and clients over the websocket.
 // Type distinguishes the different kinds of payload:
 //
-//	"join"    - client -> server, first message on connect, announces the username
-//	"history" - server -> client only, sent once right after join
-//	"message" - both directions: client sends a new message with no ID;
-//	            server assigns ID/timestamp and broadcasts it to everyone
-//	"edit"    - both directions: client asks to edit an existing message by ID;
-//	            server checks the requester is the original author, then broadcasts it
+//	"join"       - client -> server, first message on connect, announces the username
+//	"joined"     - server -> client only, confirms the join succeeded with the final username
+//	"join_error" - server -> client only, sent instead of "joined" when the name is taken/invalid;
+//	               the connection stays open so the client can retry with a different name
+//	"history"    - server -> client only, sent once right after a successful join
+//	"message"    - both directions: client sends a new message with no ID;
+//	               server assigns ID/timestamp and broadcasts it to everyone
+//	"edit"       - both directions: client asks to edit an existing message by ID;
+//	               server checks the requester is the original author, then broadcasts it
 type Message struct {
 	Type      string    `json:"type"`
 	ID        int64     `json:"id,omitempty"`
@@ -64,10 +68,20 @@ func newHub() *Hub {
 	return &Hub{clients: make(map[*Client]bool)}
 }
 
-func (h *Hub) addClient(c *Client) {
+// tryAddClient reserves c's username and adds it to the client set, but
+// only if no other currently-connected client already holds that name
+// (case-insensitive). The check and the insert happen under one lock so
+// two simultaneous join attempts for the same name can't both succeed.
+func (h *Hub) tryAddClient(c *Client) bool {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	for existing := range h.clients {
+		if strings.EqualFold(existing.username, c.username) {
+			return false
+		}
+	}
 	h.clients[c] = true
-	h.mu.Unlock()
+	return true
 }
 
 // removeClient deletes c from the client set and closes its send channel,
@@ -225,8 +239,8 @@ func (c *Client) readPump(hub *Hub) {
 	}
 }
 
-// handleConnections upgrades HTTP to WebSocket, expects a "join" as the
-// first frame, then hands off to the read/write pumps.
+// handleConnections upgrades HTTP to WebSocket, then negotiates a unique
+// username via repeated "join" attempts before starting the read/write pumps.
 func handleConnections(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -234,26 +248,56 @@ func handleConnections(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var join Message
-	if err := ws.ReadJSON(&join); err != nil || join.Type != "join" || join.Username == "" {
-		ws.Close()
-		return
+	var client *Client
+	for {
+		var join Message
+		if err := ws.ReadJSON(&join); err != nil {
+			ws.Close()
+			return
+		}
+		if join.Type != "join" {
+			continue // ignore anything before a valid join attempt
+		}
+
+		name := strings.TrimSpace(join.Username)
+		if name == "" {
+			if err := ws.WriteJSON(Message{Type: "join_error", Text: "Please enter a name."}); err != nil {
+				ws.Close()
+				return
+			}
+			continue
+		}
+		if len(name) > 30 {
+			name = name[:30]
+		}
+
+		candidate := &Client{
+			conn:     ws,
+			send:     make(chan Message, sendBufferSize),
+			username: name,
+		}
+
+		if !hub.tryAddClient(candidate) {
+			if err := ws.WriteJSON(Message{Type: "join_error", Text: "That name is already taken. Choose another."}); err != nil {
+				ws.Close()
+				return
+			}
+			continue
+		}
+
+		client = candidate
+		break
 	}
 
-	client := &Client{
-		conn:     ws,
-		send:     make(chan Message, sendBufferSize),
-		username: join.Username,
-	}
-
-	hub.addClient(client)
 	log.Printf("Client connected: %s (%s)", ws.RemoteAddr(), client.username)
 
 	go client.writePump()
 
-	// Push history to this client only, via its own send channel so it's
-	// serialized with everything else written to this connection.
+	// Push history, then confirm the join, both via this client's own send
+	// channel so they're serialized with everything else written to this
+	// connection (writePump is now the only goroutine writing to ws).
 	client.send <- Message{Type: "history", History: hub.snapshot()}
+	client.send <- Message{Type: "joined", Username: client.username}
 
 	client.readPump(hub)
 }

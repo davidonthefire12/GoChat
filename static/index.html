@@ -40,6 +40,13 @@
             min-width: 150px;
         }
 
+        #joinError {
+            width: 100%;
+            color: #c22;
+            font-size: 0.85em;
+            min-height: 1.2em;
+        }
+
         #chat {
             display: flex;
             flex-direction: column;
@@ -103,6 +110,67 @@
         #inputRow {
             display: flex;
             gap: 8px;
+            position: relative;
+        }
+
+        #emojiBtn {
+            background: #eee;
+            color: #333;
+            padding: 10px 12px;
+            font-size: 18px;
+            flex: none;
+        }
+
+        #emojiBtn:active {
+            background: #ddd;
+        }
+
+        #emojiPicker {
+            display: none;
+            position: absolute;
+            bottom: calc(100% + 8px);
+            left: 0;
+            width: 280px;
+            max-height: 240px;
+            overflow-y: auto;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            padding: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            grid-template-columns: repeat(7, 1fr);
+            gap: 4px;
+            z-index: 10;
+        }
+
+        #emojiPicker.open {
+            display: grid;
+        }
+
+        #emojiPicker .emoji-label {
+            grid-column: 1 / -1;
+            font-size: 0.7em;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            margin: 6px 0 2px 2px;
+        }
+
+        #emojiPicker .emoji-label:first-child {
+            margin-top: 0;
+        }
+
+        #emojiPicker button {
+            background: none;
+            padding: 4px;
+            font-size: 20px;
+            line-height: 1;
+            border-radius: 4px;
+        }
+
+        #emojiPicker button:active,
+        #emojiPicker button:hover {
+            background: #eee;
         }
 
         input[type=text] {
@@ -174,11 +242,14 @@
         <input type="text" id="nameInput" placeholder="Your name" maxlength="30"
                onkeydown="if(event.key==='Enter') joinChat()" />
         <button onclick="joinChat()">Join</button>
+        <div id="joinError"></div>
     </div>
     <div id="chat" style="display:none;">
         <div id="status"></div>
         <div id="messages"></div>
         <div id="inputRow">
+            <div id="emojiPicker"></div>
+            <button type="button" id="emojiBtn" onclick="toggleEmojiPicker()">😊</button>
             <input type="text" id="msgInput" placeholder="Type message..." maxlength="1000"
                    onkeydown="if(event.key==='Enter') sendMessage()" />
             <button onclick="sendMessage()">Send</button>
@@ -189,14 +260,114 @@
         let username = '';
         let editingId = null; // only one message editable at a time
 
+        const EMOJI_CATEGORIES = [
+            { label: 'Smileys', emojis: [
+                '😀','😁','😂','🤣','😊','😇','🙂','🙃','😉','😍',
+                '🥰','😘','😗','😋','😜','🤪','😝','🤑','🤔','🤨',
+                '😐','😑','😶','🙄','😏','😒','😬','🤐','😴','😪',
+                '😷','🤒','🤕','🥵','🥶','😵','🤯','🥳','😎','🤓',
+                '😕','😟','🙁','😮','😯','😲','😳','🥺','😦','😧',
+                '😨','😰','😥','😢','😭','😱','😖','😣','😞','😓',
+                '😩','😫','🥱','😤','😡','😠','🤬','😈','👿','💀'
+            ]},
+            { label: 'Gestures & People', emojis: [
+                '👋','🤚','🖐️','✋','🖖','👌','🤌','🤏','✌️','🤞',
+                '🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍',
+                '👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🙏',
+                '💪','🫶','🤝','🙋','🧑','👶','🧓','👴','👵','🧕'
+            ]},
+            { label: 'Hearts & Symbols', emojis: [
+                '❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔',
+                '❣️','💕','💞','💓','💗','💖','💘','💝','💟','✨',
+                '⭐','🌟','💫','⚡','🔥','💯','✅','❌','❓','❗',
+                '☮️','☯️','♻️','💤','💢','💥','💦','💨'
+            ]},
+            { label: 'Animals & Nature', emojis: [
+                '🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯',
+                '🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧',
+                '🐦','🦋','🐢','🐍','🐙','🦀','🐳','🐬','🦄','🐝',
+                '☀️','🌤️','⛅','🌧️','⛈️','❄️','🌈','🌙','🌊','🌸'
+            ]},
+            { label: 'Food & Drink', emojis: [
+                '🍏','🍎','🍌','🍉','🍇','🍓','🍒','🍑','🥭','🍍',
+                '🥑','🍕','🍔','🌭','🍟','🌮','🌯','🍜','🍣','🍩',
+                '🍪','🎂','🍰','🍫','🍿','🧁','☕','🍺','🍷','🥤'
+            ]},
+            { label: 'Activities & Objects', emojis: [
+                '🚀','⚽','🏀','🏈','🎮','🎲','🎸','🎨','🎬','📷',
+                '🎧','🎁','🎉','🎈','🏆','⏰','💡','📱','💻','📚',
+                '✈️','🚗','🚲','🏠','🌍','🔑','💰','💎'
+            ]}
+        ];
+
+        function buildEmojiPicker() {
+            const picker = document.getElementById('emojiPicker');
+            EMOJI_CATEGORIES.forEach(function(category) {
+                const label = document.createElement('div');
+                label.className = 'emoji-label';
+                label.textContent = category.label;
+                picker.appendChild(label);
+
+                category.emojis.forEach(function(emoji) {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.textContent = emoji;
+                    btn.onclick = function() { insertEmoji(emoji); };
+                    picker.appendChild(btn);
+                });
+            });
+        }
+
+        function toggleEmojiPicker() {
+            document.getElementById('emojiPicker').classList.toggle('open');
+        }
+
+        function closeEmojiPicker() {
+            document.getElementById('emojiPicker').classList.remove('open');
+        }
+
+        // Inserts the emoji at the current cursor position in the message
+        // input (falls back to appending if the input has no selection).
+        function insertEmoji(emoji) {
+            const input = document.getElementById('msgInput');
+            const start = input.selectionStart ?? input.value.length;
+            const end = input.selectionEnd ?? input.value.length;
+            input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
+            const cursor = start + emoji.length;
+            input.focus();
+            input.setSelectionRange(cursor, cursor);
+            closeEmojiPicker();
+        }
+
+        // Close the picker when tapping/clicking anywhere outside it or the toggle button.
+        document.addEventListener('click', function(e) {
+            const picker = document.getElementById('emojiPicker');
+            const btn = document.getElementById('emojiBtn');
+            if (picker.classList.contains('open') && !picker.contains(e.target) && e.target !== btn) {
+                closeEmojiPicker();
+            }
+        });
+
+        buildEmojiPicker();
+
+        let lastAttemptedName = '';
+        let joined = false;
+
         function joinChat() {
             const name = document.getElementById('nameInput').value.trim();
-            if (!name) return alert('Enter your name');
-            username = name;
+            if (!name) {
+                showJoinError('Enter your name');
+                return;
+            }
+            hideJoinError();
+            lastAttemptedName = name;
 
-            document.getElementById('join').style.display = 'none';
-            document.getElementById('chat').style.display = 'flex';
-            connect();
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Socket already open from a previous rejected attempt - just retry.
+                ws.send(JSON.stringify({ type: 'join', username: name }));
+            } else {
+                connect();
+            }
         }
 
         function connect() {
@@ -204,8 +375,8 @@
             ws = new WebSocket(proto + '://' + location.host + '/ws');
 
             ws.onopen = function() {
-                setStatus('Connected', '#2a2');
-                ws.send(JSON.stringify({ type: 'join', username: username }));
+                setStatus('Connecting…', '#888');
+                ws.send(JSON.stringify({ type: 'join', username: lastAttemptedName }));
             };
 
             ws.onmessage = function(e) {
@@ -216,7 +387,23 @@
                     return; // ignore malformed payloads
                 }
 
-                if (msg.type === 'history') {
+                if (msg.type === 'joined') {
+                    // Server is the source of truth for our username - only
+                    // now do we know the name was actually accepted.
+                    username = msg.username;
+                    joined = true;
+                    hideJoinError();
+                    document.getElementById('join').style.display = 'none';
+                    document.getElementById('chat').style.display = 'flex';
+                    setStatus('Connected', '#2a2');
+                } else if (msg.type === 'join_error') {
+                    // Name rejected (taken or invalid). The connection stays
+                    // open server-side, so the user can just try another name.
+                    joined = false;
+                    document.getElementById('chat').style.display = 'none';
+                    document.getElementById('join').style.display = 'flex';
+                    showJoinError(msg.text);
+                } else if (msg.type === 'history') {
                     document.getElementById('messages').innerHTML = '';
                     (msg.history || []).forEach(addMessage);
                 } else if (msg.type === 'message') {
@@ -227,13 +414,23 @@
             };
 
             ws.onclose = function() {
-                setStatus('Disconnected — reconnecting…', '#c22');
+                if (joined) {
+                    setStatus('Disconnected — reconnecting…', '#c22');
+                }
                 setTimeout(connect, 2000);
             };
 
             ws.onerror = function() {
                 ws.close();
             };
+        }
+
+        function showJoinError(text) {
+            document.getElementById('joinError').textContent = text;
+        }
+
+        function hideJoinError() {
+            document.getElementById('joinError').textContent = '';
         }
 
         function setStatus(text, color) {
