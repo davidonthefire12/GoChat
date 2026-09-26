@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LAN Chat</title>
+    <style>
+        body { font-family: Arial; max-width: 600px; margin: 30px auto; }
+        #messages { height: 400px; overflow-y: auto; border: 1px solid #ccc;
+                    padding: 10px; margin-bottom: 10px; border-radius: 5px; }
+        .msg { margin-bottom: 6px; word-wrap: break-word; }
+        .username { font-weight: bold; color: #0066cc; }
+        .system { color: #888; font-style: italic; }
+        input[type=text] { width: 75%; padding: 8px; }
+        button { padding: 8px 15px; }
+        #status { font-size: 0.85em; color: #888; margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+    <h2>💬 LAN Chat</h2>
+    <div id="join">
+        <input type="text" id="nameInput" placeholder="Your name" maxlength="30"
+               onkeydown="if(event.key==='Enter') joinChat()" />
+        <button onclick="joinChat()">Join</button>
+    </div>
+    <div id="chat" style="display:none;">
+        <div id="status"></div>
+        <div id="messages"></div>
+        <input type="text" id="msgInput" placeholder="Type message..." maxlength="1000"
+               onkeydown="if(event.key==='Enter') sendMessage()" />
+        <button onclick="sendMessage()">Send</button>
+    </div>
+    <script>
+        let ws;
+        let username = '';
+
+        function joinChat() {
+            const name = document.getElementById('nameInput').value.trim();
+            if (!name) return alert('Enter your name');
+            username = name;
+
+            document.getElementById('join').style.display = 'none';
+            document.getElementById('chat').style.display = 'block';
+            connect();
+        }
+
+        function connect() {
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(proto + '://' + location.host + '/ws');
+
+            ws.onopen = function() {
+                setStatus('Connected', '#2a2');
+            };
+
+            ws.onmessage = function(e) {
+                let msg;
+                try {
+                    msg = JSON.parse(e.data);
+                } catch (err) {
+                    return; // ignore malformed payloads
+                }
+                addMessage(msg.username, msg.text);
+            };
+
+            ws.onclose = function() {
+                setStatus('Disconnected — reconnecting…', '#c22');
+                setTimeout(connect, 2000);
+            };
+
+            ws.onerror = function() {
+                ws.close();
+            };
+        }
+
+        function setStatus(text, color) {
+            const el = document.getElementById('status');
+            el.textContent = text;
+            el.style.color = color;
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('msgInput');
+            const text = input.value.trim();
+            if (!text) return;
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                setStatus('Not connected yet — hang on…', '#c22');
+                return;
+            }
+
+            ws.send(JSON.stringify({ username: username, text: text }));
+            input.value = '';
+        }
+
+        // Builds message DOM nodes directly (textContent, not innerHTML) so
+        // usernames/messages can never be interpreted as HTML/script.
+        function addMessage(user, text) {
+            const div = document.createElement('div');
+            div.className = 'msg';
+
+            const userSpan = document.createElement('span');
+            userSpan.className = 'username';
+            userSpan.textContent = user + ': ';
+
+            const textNode = document.createTextNode(text);
+
+            div.appendChild(userSpan);
+            div.appendChild(textNode);
+
+            const messages = document.getElementById('messages');
+            messages.appendChild(div);
+            messages.scrollTop = messages.scrollHeight;
+        }
+    </script>
+</body>
+</html>
