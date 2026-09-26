@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -143,18 +144,17 @@ func main() {
 	})
 
 	port := os.Getenv("PORT")
-		if port == "" {
-			port = "8080"
-		}
+	if port == "" {
+		port = "8080"
+	}
 
-	add := ":"+ port
+	addr := ":" + port
 	ip := getLocalIP()
 
-
 	fmt.Println("========================================")
-	fmt.Println("  Chat server running!")
-	fmt.Printf("  On this PC:      http://localhost%s\n", port)
-	fmt.Printf("  Share with LAN:  http://%s%s\n", ip, port)
+	fmt.Println("  Chat server running!")
+	fmt.Printf("  On this PC:      http://localhost%s\n", addr)
+	fmt.Printf("  Share with LAN:  http://%s%s\n", ip, addr)
 	fmt.Println("========================================")
 
 	if err := http.ListenAndServe(addr, nil); err != nil {
