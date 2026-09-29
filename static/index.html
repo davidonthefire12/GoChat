@@ -63,6 +63,7 @@
             margin-bottom: 10px;
             border-radius: 5px;
             -webkit-overflow-scrolling: touch;
+            scroll-behavior: smooth;
         }
 
         .msg {
@@ -350,6 +351,15 @@
 
         buildEmojiPicker();
 
+        // On mobile, the on-screen keyboard opening/closing resizes the
+        // visible viewport, which can leave the latest message hidden
+        // behind it even though scrollTop was already correct. Re-anchor
+        // to the bottom whenever that happens, and when the input gets focus.
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', scrollToBottom);
+        }
+        document.getElementById('msgInput').addEventListener('focus', scrollToBottom);
+
         let lastAttemptedName = '';
         let joined = false;
 
@@ -485,7 +495,19 @@
 
             const messages = document.getElementById('messages');
             messages.appendChild(div);
-            messages.scrollTop = messages.scrollHeight;
+            scrollToBottom();
+        }
+
+        // Scrolls the message list to the very bottom. Deferred to the next
+        // animation frame so it runs after the browser has actually laid out
+        // the new/changed content (appending a node doesn't always update
+        // scrollHeight synchronously, especially right as the on-screen
+        // keyboard is resizing the viewport on mobile).
+        function scrollToBottom() {
+            requestAnimationFrame(function() {
+                const messages = document.getElementById('messages');
+                messages.scrollTop = messages.scrollHeight;
+            });
         }
 
         // Swaps a message's text span for an inline input. Enter saves,
