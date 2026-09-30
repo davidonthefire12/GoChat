@@ -47,6 +47,13 @@
             min-height: 1.2em;
         }
 
+        #joinHint {
+            width: 100%;
+            color: #888;
+            font-size: 0.8em;
+            margin-top: 2px;
+        }
+
         #chat {
             display: flex;
             flex-direction: column;
@@ -242,7 +249,10 @@
     <div id="join">
         <input type="text" id="nameInput" placeholder="Your name" maxlength="30"
                onkeydown="if(event.key==='Enter') joinChat()" />
+        <input type="password" id="passInput" placeholder="Password" maxlength="100"
+               onkeydown="if(event.key==='Enter') joinChat()" />
         <button onclick="joinChat()">Join</button>
+        <div id="joinHint">First time using this name? That password will be set for it - use the same one to log back in from any device.</div>
         <div id="joinError"></div>
     </div>
     <div id="chat" style="display:none;">
@@ -361,20 +371,27 @@
         document.getElementById('msgInput').addEventListener('focus', scrollToBottom);
 
         let lastAttemptedName = '';
+        let lastAttemptedPassword = '';
         let joined = false;
 
         function joinChat() {
             const name = document.getElementById('nameInput').value.trim();
+            const pass = document.getElementById('passInput').value;
             if (!name) {
                 showJoinError('Enter your name');
                 return;
             }
+            if (pass.length < 4) {
+                showJoinError('Password must be at least 4 characters');
+                return;
+            }
             hideJoinError();
             lastAttemptedName = name;
+            lastAttemptedPassword = pass;
 
             if (ws && ws.readyState === WebSocket.OPEN) {
                 // Socket already open from a previous rejected attempt - just retry.
-                ws.send(JSON.stringify({ type: 'join', username: name }));
+                ws.send(JSON.stringify({ type: 'join', username: name, password: pass }));
             } else {
                 connect();
             }
@@ -386,7 +403,11 @@
 
             ws.onopen = function() {
                 setStatus('Connecting…', '#888');
-                ws.send(JSON.stringify({ type: 'join', username: lastAttemptedName }));
+                ws.send(JSON.stringify({
+                    type: 'join',
+                    username: lastAttemptedName,
+                    password: lastAttemptedPassword
+                }));
             };
 
             ws.onmessage = function(e) {
@@ -399,7 +420,7 @@
 
                 if (msg.type === 'joined') {
                     // Server is the source of truth for our username - only
-                    // now do we know the name was actually accepted.
+                    // now do we know the name/password combo was accepted.
                     username = msg.username;
                     joined = true;
                     hideJoinError();
@@ -407,8 +428,8 @@
                     document.getElementById('chat').style.display = 'flex';
                     setStatus('Connected', '#2a2');
                 } else if (msg.type === 'join_error') {
-                    // Name rejected (taken or invalid). The connection stays
-                    // open server-side, so the user can just try another name.
+                    // Rejected (bad name, wrong password, etc). The connection
+                    // stays open server-side, so the user can just retry.
                     joined = false;
                     document.getElementById('chat').style.display = 'none';
                     document.getElementById('join').style.display = 'flex';
@@ -420,6 +441,8 @@
                     addMessage(msg);
                 } else if (msg.type === 'edit') {
                     updateMessage(msg);
+                } else if (msg.type === 'delete') {
+                    removeMessage(msg.id);
                 }
             };
 
@@ -484,18 +507,41 @@
             div.appendChild(userSpan);
             div.appendChild(textSpan);
 
-            if (m.username === username) {
+            if (m.username.toLowerCase() === username.toLowerCase()) {
                 const editBtn = document.createElement('button');
                 editBtn.className = 'edit-btn';
                 editBtn.type = 'button';
                 editBtn.textContent = 'Edit';
                 editBtn.onclick = function() { startEdit(div, m.id, textSpan); };
                 div.appendChild(editBtn);
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'edit-btn';
+                deleteBtn.type = 'button';
+                deleteBtn.textContent = 'Delete';
+                deleteBtn.onclick = function() { confirmDelete(m.id); };
+                div.appendChild(deleteBtn);
             }
 
             const messages = document.getElementById('messages');
             messages.appendChild(div);
             scrollToBottom();
+        }
+
+        // Asks for confirmation, then asks the server to delete a message.
+        // The server re-checks ownership itself, so this is just UX - it
+        // can't actually delete someone else's message even if forced.
+        function confirmDelete(id) {
+            if (!confirm('Delete this message? This cannot be undone.')) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            ws.send(JSON.stringify({ type: 'delete', id: id }));
+        }
+
+        // Removes a message from the DOM entirely once the server confirms
+        // it was deleted (broadcast to everyone, including the sender).
+        function removeMessage(id) {
+            const div = document.querySelector('.msg[data-id="' + id + '"]');
+            if (div) div.remove();
         }
 
         // Scrolls the message list to the very bottom. Deferred to the next

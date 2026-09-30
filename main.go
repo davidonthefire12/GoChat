@@ -14,24 +14,32 @@ import (
 
 	"github.com/gorilla/websocket"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Message is exchanged between server and clients over the websocket.
 // Type distinguishes the different kinds of payload:
 //
-//	"join"       - client -> server, first message on connect, announces the username
-//	"joined"     - server -> client only, confirms the join succeeded with the final username
-//	"join_error" - server -> client only, sent instead of "joined" when the name is taken/invalid;
-//	               the connection stays open so the client can retry with a different name
+//	"join"       - client -> server, first message on connect: username + password.
+//	               The first time a username is used it's registered with that
+//	               password; every time after, the same password is required.
+//	"joined"     - server -> client only, confirms auth succeeded, with the
+//	               canonical (originally-registered) username casing
+//	"join_error" - server -> client only, sent instead of "joined" on bad/missing
+//	               name, wrong password, etc. The connection stays open so the
+//	               client can retry.
 //	"history"    - server -> client only, sent once right after a successful join
 //	"message"    - both directions: client sends a new message with no ID;
 //	               server stores it in Postgres, assigns ID/timestamp, and broadcasts it
 //	"edit"       - both directions: client asks to edit an existing message by ID;
 //	               server checks the requester is the original author, persists it, then broadcasts it
+//	"delete"     - both directions: client asks to delete an existing message by ID;
+//	               server checks the requester is the original author, deletes it, then broadcasts {type:"delete", id}
 type Message struct {
 	Type      string    `json:"type"`
 	ID        int64     `json:"id,omitempty"`
 	Username  string    `json:"username,omitempty"`
+	Password  string    `json:"password,omitempty"` // only ever used on "join"; never stored, never echoed back
 	Text      string    `json:"text,omitempty"`
 	Timestamp int64     `json:"ts,omitempty"`
 	History   []Message `json:"history,omitempty"`
@@ -44,12 +52,17 @@ const (
 	maxHistory     = 200                 // how many recent messages are cached/synced to new clients
 	sendBufferSize = 16
 	dbTimeout      = 5 * time.Second
+	minPasswordLen = 4
 )
 
 // Client represents one connected websocket connection.
 // Every write to conn goes through the send channel and is handled by a
 // single writePump goroutine per client, so broadcasts, pings, and the
 // initial history push never race on the same connection.
+//
+// Multiple Clients can share the same username at once (e.g. the same
+// person logged in from phone and laptop) - that's safe now because the
+// username is password-protected, not just claimed by whoever types it first.
 type Client struct {
 	conn     *websocket.Conn
 	send     chan Message
@@ -58,9 +71,8 @@ type Client struct {
 
 // Hub owns all shared state: connected clients and an in-memory cache of
 // the most recent messages. Postgres (Supabase) is the durable source of
-// truth - the cache just makes syncing a newly joined client fast and lets
-// the app keep working (in a degraded, non-persistent way) if the database
-// is briefly unreachable for a write.
+// truth for both messages and user accounts - the cache just makes syncing
+// a newly joined client fast.
 type Hub struct {
 	mu      sync.Mutex
 	clients map[*Client]bool
@@ -115,20 +127,75 @@ func (h *Hub) loadHistory(ctx context.Context) error {
 	return nil
 }
 
-// tryAddClient reserves c's username and adds it to the client set, but
-// only if no other currently-connected client already holds that name
-// (case-insensitive). The check and the insert happen under one lock so
-// two simultaneous join attempts for the same name can't both succeed.
-func (h *Hub) tryAddClient(c *Client) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for existing := range h.clients {
-		if strings.EqualFold(existing.username, c.username) {
-			return false
+// authenticate checks a username/password pair against the users table.
+//   - If the username has never been used before, it's registered with the
+//     given password (first-use-claims-the-name, like most simple chat apps).
+//   - If it exists, the password must match.
+//
+// Returns the canonical username (the exact casing it was originally
+// registered with - so the same identity always has one consistent casing
+// in the messages table, regardless of how it's typed on any given login),
+// whether auth succeeded, and any hard error.
+func (h *Hub) authenticate(ctx context.Context, username, password string) (canonical string, ok bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	lower := strings.ToLower(username)
+
+	var storedUsername, hash string
+	err = h.db.QueryRowContext(ctx,
+		`SELECT username, password_hash FROM users WHERE username_lower = $1`,
+		lower,
+	).Scan(&storedUsername, &hash)
+
+	if err == nil {
+		// Existing account - password must match.
+		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+			return "", false, nil
 		}
+		return storedUsername, true, nil
 	}
+	if err != sql.ErrNoRows {
+		return "", false, fmt.Errorf("lookup user: %w", err)
+	}
+
+	// No account yet for this name - register it now.
+	newHash, herr := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if herr != nil {
+		return "", false, fmt.Errorf("hash password: %w", herr)
+	}
+	_, ierr := h.db.ExecContext(ctx,
+		`INSERT INTO users (username_lower, username, password_hash, created_at)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (username_lower) DO NOTHING`,
+		lower, username, string(newHash), time.Now().Unix(),
+	)
+	if ierr != nil {
+		return "", false, fmt.Errorf("register user: %w", ierr)
+	}
+
+	// Re-read: if someone else won a simultaneous registration race for this
+	// exact name, this checks our password against whichever row actually landed.
+	var finalUsername, finalHash string
+	if serr := h.db.QueryRowContext(ctx,
+		`SELECT username, password_hash FROM users WHERE username_lower = $1`,
+		lower,
+	).Scan(&finalUsername, &finalHash); serr != nil {
+		return "", false, fmt.Errorf("verify registration: %w", serr)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(finalHash), []byte(password)) != nil {
+		return "", false, nil // someone else registered this name a moment earlier
+	}
+	return finalUsername, true, nil
+}
+
+// addClient adds an already-authenticated client to the active set.
+// No uniqueness check here - a verified username can have several
+// simultaneous connections (multiple devices, same identity).
+func (h *Hub) addClient(c *Client) {
+	h.mu.Lock()
 	h.clients[c] = true
-	return true
+	h.mu.Unlock()
 }
 
 // removeClient deletes c from the client set and closes its send channel,
@@ -187,16 +254,18 @@ func (h *Hub) addMessage(ctx context.Context, username, text string) (Message, e
 }
 
 // applyEdit updates an existing message's text in Postgres, but only if
-// username matches the message's original author (enforced in the SQL
-// WHERE clause itself, so it's race-safe against concurrent edits).
-// Returns the updated message and whether the edit was allowed.
+// username matches the message's original author. Comparison is
+// case-insensitive defensively, though canonical usernames from
+// authenticate() should already be consistent across sessions/devices.
+// Enforced in the SQL WHERE clause itself, so it's race-safe against
+// concurrent edits.
 func (h *Hub) applyEdit(ctx context.Context, id int64, username, text string) (Message, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 
 	ts := time.Now().Unix()
 	res, err := h.db.ExecContext(ctx,
-		`UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3 AND username = $4`,
+		`UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3 AND lower(username) = lower($4)`,
 		text, ts, id, username,
 	)
 	if err != nil {
@@ -223,6 +292,40 @@ func (h *Hub) applyEdit(ctx context.Context, id int64, username, text string) (M
 	h.mu.Unlock()
 
 	return updated, true, nil
+}
+
+// deleteMessage removes a message from Postgres, but only if username
+// matches the original author (same case-insensitive check as edits,
+// enforced in SQL). Returns whether a row was actually deleted.
+func (h *Hub) deleteMessage(ctx context.Context, id int64, username string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	res, err := h.db.ExecContext(ctx,
+		`DELETE FROM messages WHERE id = $1 AND lower(username) = lower($2)`,
+		id, username,
+	)
+	if err != nil {
+		return false, fmt.Errorf("delete message: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, nil // no such message, or requester isn't the author
+	}
+
+	h.mu.Lock()
+	for i := range h.history {
+		if h.history[i].ID == id {
+			h.history = append(h.history[:i], h.history[i+1:]...)
+			break
+		}
+	}
+	h.mu.Unlock()
+
+	return true, nil
 }
 
 // broadcast queues msg for every connected client. A client whose buffer
@@ -317,14 +420,26 @@ func (c *Client) readPump(hub *Hub) {
 			}
 			hub.broadcast(updated)
 
+		case "delete":
+			ok, err := hub.deleteMessage(context.Background(), in.ID, c.username)
+			if err != nil {
+				log.Printf("failed to delete message for %s: %v", c.username, err)
+				continue
+			}
+			if !ok {
+				continue // no such message, or requester isn't the author - ignore
+			}
+			hub.broadcast(Message{Type: "delete", ID: in.ID})
+
 		default:
 			// unknown/legacy message type, ignore
 		}
 	}
 }
 
-// handleConnections upgrades HTTP to WebSocket, then negotiates a unique
-// username via repeated "join" attempts before starting the read/write pumps.
+// handleConnections upgrades HTTP to WebSocket, then authenticates the
+// connection via repeated "join" (username+password) attempts before
+// starting the read/write pumps.
 func handleConnections(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -354,22 +469,37 @@ func handleConnections(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		if len(name) > 30 {
 			name = name[:30]
 		}
-
-		candidate := &Client{
-			conn:     ws,
-			send:     make(chan Message, sendBufferSize),
-			username: name,
-		}
-
-		if !hub.tryAddClient(candidate) {
-			if err := ws.WriteJSON(Message{Type: "join_error", Text: "That name is already taken. Choose another."}); err != nil {
+		if len(join.Password) < minPasswordLen {
+			if err := ws.WriteJSON(Message{Type: "join_error", Text: fmt.Sprintf("Password must be at least %d characters.", minPasswordLen)}); err != nil {
 				ws.Close()
 				return
 			}
 			continue
 		}
 
-		client = candidate
+		canonical, ok, authErr := hub.authenticate(context.Background(), name, join.Password)
+		if authErr != nil {
+			log.Printf("auth error for %q: %v", name, authErr)
+			if err := ws.WriteJSON(Message{Type: "join_error", Text: "Server error, please try again."}); err != nil {
+				ws.Close()
+				return
+			}
+			continue
+		}
+		if !ok {
+			if err := ws.WriteJSON(Message{Type: "join_error", Text: "Incorrect password for that username."}); err != nil {
+				ws.Close()
+				return
+			}
+			continue
+		}
+
+		client = &Client{
+			conn:     ws,
+			send:     make(chan Message, sendBufferSize),
+			username: canonical,
+		}
+		hub.addClient(client)
 		break
 	}
 
