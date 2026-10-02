@@ -74,15 +74,30 @@
         }
 
         .msg {
+            position: relative;
             margin-bottom: 8px;
             word-wrap: break-word;
             overflow-wrap: break-word;
             line-height: 1.4;
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 6px;
+        }
+
+        .msg:hover {
+            background: #f5f5f5;
         }
 
         .username {
             font-weight: bold;
             color: #0066cc;
+        }
+
+        .timestamp {
+            font-size: 0.7em;
+            color: #999;
+            margin-left: 6px;
+            white-space: nowrap;
         }
 
         .edited-tag {
@@ -92,10 +107,24 @@
             margin-left: 4px;
         }
 
-        .edit-btn {
-            margin-left: 6px;
-            font-size: 0.75em;
-            padding: 2px 6px;
+        .action-menu {
+            position: absolute;
+            top: 100%;
+            left: 6px;
+            margin-top: 4px;
+            display: flex;
+            gap: 4px;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            padding: 4px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+            z-index: 20;
+        }
+
+        .action-menu button {
+            font-size: 0.8em;
+            padding: 5px 12px;
             background: #eee;
             color: #333;
             border: 1px solid #ccc;
@@ -103,7 +132,7 @@
             cursor: pointer;
         }
 
-        .edit-btn:active {
+        .action-menu button:active {
             background: #ddd;
         }
 
@@ -187,6 +216,7 @@
             font-size: 16px; /* prevents iOS auto-zoom on focus */
             border: 1px solid #ccc;
             border-radius: 5px;
+            width: 100%;
         }
 
         #msgInput {
@@ -488,6 +518,20 @@
             input.focus();
         }
 
+        let selectedMessageId = null; // id of the message whose action menu is open, or null
+
+        // Formats a unix-seconds timestamp as "hh:mm AM/PM" in the viewer's local time.
+        function formatTimestamp(ts) {
+            if (!ts) return '';
+            const date = new Date(ts * 1000);
+            let hours = date.getHours();
+            const minutes = date.getMinutes().toString().padStart(2, '0');
+            const ampm = hours >= 12 ? 'PM' : 'AM';
+            hours = hours % 12;
+            if (hours === 0) hours = 12;
+            return hours.toString().padStart(2, '0') + ':' + minutes + ' ' + ampm;
+        }
+
         // Renders one message. All text goes through textContent (never
         // innerHTML) so a username or message body can never be interpreted
         // as HTML/script.
@@ -505,29 +549,85 @@
             textSpan.className = 'text';
             textSpan.textContent = m.text;
 
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'timestamp';
+            timeSpan.textContent = formatTimestamp(m.timestamp);
+
             div.appendChild(userSpan);
             div.appendChild(textSpan);
+            div.appendChild(timeSpan);
 
-            if (m.username.toLowerCase() === username.toLowerCase()) {
-                const editBtn = document.createElement('button');
-                editBtn.className = 'edit-btn';
-                editBtn.type = 'button';
-                editBtn.textContent = 'Edit';
-                editBtn.onclick = function() { startEdit(div, m.id, textSpan); };
-                div.appendChild(editBtn);
-
-                const deleteBtn = document.createElement('button');
-                deleteBtn.className = 'edit-btn';
-                deleteBtn.type = 'button';
-                deleteBtn.textContent = 'Delete';
-                deleteBtn.onclick = function() { confirmDelete(m.id); };
-                div.appendChild(deleteBtn);
-            }
+            // Clicking the bubble toggles its action menu. stopPropagation
+            // keeps this same click from also hitting the document-level
+            // "click outside" listener below and instantly closing what we
+            // just opened/toggled.
+            div.addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (editingId !== null) return; // don't toggle while editing
+                toggleActionMenu(div, m.id);
+            });
 
             const messages = document.getElementById('messages');
             messages.appendChild(div);
             scrollToBottom();
         }
+
+        // Opens (or closes, if already open) the Edit/Delete popover for one
+        // message. Only renders Edit/Delete when the clicked message belongs
+        // to the current user - the server enforces this too, but there's no
+        // point offering an action that would just be rejected.
+        function toggleActionMenu(div, id) {
+            if (selectedMessageId === id) {
+                closeActionMenu();
+                return;
+            }
+            closeActionMenu(); // only one menu open at a time
+
+            selectedMessageId = id;
+            const isOwn = div.dataset.username.toLowerCase() === username.toLowerCase();
+            if (!isOwn) return; // selection noted, but nothing actionable to show
+
+            const menu = document.createElement('div');
+            menu.className = 'action-menu';
+
+            const editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.textContent = 'Edit';
+            editBtn.onclick = function(e) {
+                e.stopPropagation();
+                closeActionMenu();
+                // Look up the current .text span fresh - a prior edit may
+                // have replaced the original node, so a captured reference
+                // could be stale/detached by now.
+                startEdit(div, id, div.querySelector('.text'));
+            };
+            menu.appendChild(editBtn);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.textContent = 'Delete';
+            deleteBtn.onclick = function(e) {
+                e.stopPropagation();
+                closeActionMenu();
+                confirmDelete(id);
+            };
+            menu.appendChild(deleteBtn);
+
+            div.appendChild(menu);
+        }
+
+        function closeActionMenu() {
+            const openMenu = document.querySelector('.action-menu');
+            if (openMenu) openMenu.remove();
+            selectedMessageId = null;
+        }
+
+        // Closes the open action menu on any click outside it. Bubble clicks
+        // that open/toggle a menu call stopPropagation, so this only fires
+        // for genuinely outside clicks (background, input row, etc).
+        document.addEventListener('click', function() {
+            if (selectedMessageId !== null) closeActionMenu();
+        });
 
         // Asks for confirmation, then asks the server to delete a message.
         // The server re-checks ownership itself, so this is just UX - it

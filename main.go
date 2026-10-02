@@ -41,7 +41,7 @@ type Message struct {
 	Username  string    `json:"username,omitempty"`
 	Password  string    `json:"password,omitempty"` // only ever used on "join"; never stored, never echoed back
 	Text      string    `json:"text,omitempty"`
-	Timestamp int64     `json:"ts,omitempty"`
+	Timestamp int64     `json:"timestamp,omitempty"`
 	History   []Message `json:"history,omitempty"`
 }
 
