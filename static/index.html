@@ -302,6 +302,72 @@
         let username = '';
         let editingId = null; // only one message editable at a time
 
+        // --- New-message notifications ---------------------------------
+        const originalTitle = document.title;
+        let unreadCount = 0;
+
+        function requestNotificationPermission() {
+            if (!('Notification' in window)) return; // unsupported browser, fail silently
+            if (Notification.permission === 'default') {
+                Notification.requestPermission();
+            }
+        }
+
+        // Called for every incoming message that isn't our own. Only
+        // actually alerts the person if they're not currently looking at
+        // the tab - no point interrupting someone already reading it.
+        function notifyNewMessage(msg) {
+            if (document.hasFocus() && !document.hidden) return;
+
+            unreadCount++;
+            document.title = '(' + unreadCount + ') ' + originalTitle;
+            playPing();
+
+            if ('Notification' in window && Notification.permission === 'granted') {
+                const n = new Notification(msg.username, {
+                    body: msg.text,
+                    tag: 'lan-chat' // collapses into one notification instead of piling up
+                });
+                n.onclick = function() {
+                    window.focus();
+                    n.close();
+                };
+            }
+        }
+
+        // Resets the unread badge once the person actually comes back.
+        function clearUnread() {
+            if (unreadCount === 0) return;
+            unreadCount = 0;
+            document.title = originalTitle;
+        }
+        window.addEventListener('focus', clearUnread);
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) clearUnread();
+        });
+
+        // Short, quiet beep - no external audio file needed. Best-effort:
+        // some mobile browsers block audio outside a direct user gesture,
+        // so this silently does nothing there instead of throwing.
+        function playPing() {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.value = 880;
+                gain.gain.setValueAtTime(0.15, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.3);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + 0.3);
+            } catch (err) {
+                // AudioContext unavailable/blocked - no sound, no problem.
+            }
+        }
+        // -----------------------------------------------------------------
+
         const EMOJI_CATEGORIES = [
             { label: 'Smileys', emojis: [
                 '😀','😁','😂','🤣','😊','😇','🙂','🙃','😉','😍',
@@ -419,6 +485,7 @@
             hideJoinError();
             lastAttemptedName = name;
             lastAttemptedPassword = pass;
+            requestNotificationPermission();
 
             if (ws && ws.readyState === WebSocket.OPEN) {
                 // Socket already open from a previous rejected attempt - just retry.
@@ -470,6 +537,9 @@
                     (msg.history || []).forEach(addMessage);
                 } else if (msg.type === 'message') {
                     addMessage(msg);
+                    if (msg.username.toLowerCase() !== username.toLowerCase()) {
+                        notifyNewMessage(msg);
+                    }
                 } else if (msg.type === 'edit') {
                     updateMessage(msg);
                 } else if (msg.type === 'delete') {
@@ -516,6 +586,7 @@
             ws.send(JSON.stringify({ type: 'message', text: text }));
             input.value = '';
             input.focus();
+            clearUnread();
         }
 
         let selectedMessageId = null; // id of the message whose action menu is open, or null
