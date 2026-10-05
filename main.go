@@ -2,11 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -14,35 +20,41 @@ import (
 
 	"github.com/gorilla/websocket"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
+	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 )
 
+// ReplyPreview is the small quoted snippet shown above a reply. The server
+// builds it from the database (never from client input) so it can't be spoofed.
+// Deleted is true once the original message no longer exists.
+type ReplyPreview struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Deleted  bool   `json:"deleted,omitempty"`
+}
+
 // Message is exchanged between server and clients over the websocket.
-// Type distinguishes the different kinds of payload:
+// Authentication happens over HTTP (/api/login sets an HttpOnly session
+// cookie); the websocket upgrade is authorised by that cookie, so no
+// credentials ever travel over the socket. Type distinguishes payloads:
 //
-//	"join"       - client -> server, first message on connect: username + password.
-//	               The first time a username is used it's registered with that
-//	               password; every time after, the same password is required.
-//	"joined"     - server -> client only, confirms auth succeeded, with the
-//	               canonical (originally-registered) username casing
-//	"join_error" - server -> client only, sent instead of "joined" on bad/missing
-//	               name, wrong password, etc. The connection stays open so the
-//	               client can retry.
-//	"history"    - server -> client only, sent once right after a successful join
-//	"message"    - both directions: client sends a new message with no ID;
-//	               server stores it in Postgres, assigns ID/timestamp, and broadcasts it
-//	"edit"       - both directions: client asks to edit an existing message by ID;
-//	               server checks the requester is the original author, persists it, then broadcasts it
-//	"delete"     - both directions: client asks to delete an existing message by ID;
-//	               server checks the requester is the original author, deletes it, then broadcasts {type:"delete", id}
+//	"joined"  - server -> client only, first frame after the upgrade, with
+//	            the canonical (originally-registered) username casing
+//	"history" - server -> client only, sent once right after "joined"
+//	"message" - both directions: client sends text (+ optional reply_to_id);
+//	            server stores it, assigns ID/timestamp/reply preview, broadcasts it
+//	"edit"    - both directions: author-only edit by ID, persisted then broadcast
+//	"delete"  - both directions: author-only delete by ID, then broadcast {type:"delete", id}
 type Message struct {
-	Type      string    `json:"type"`
-	ID        int64     `json:"id,omitempty"`
-	Username  string    `json:"username,omitempty"`
-	Password  string    `json:"password,omitempty"` // only ever used on "join"; never stored, never echoed back
-	Text      string    `json:"text,omitempty"`
-	Timestamp int64     `json:"timestamp,omitempty"`
-	History   []Message `json:"history,omitempty"`
+	Type      string        `json:"type"`
+	ID        int64         `json:"id,omitempty"`
+	Username  string        `json:"username,omitempty"`
+	Text      string        `json:"text,omitempty"`
+	Timestamp int64         `json:"timestamp,omitempty"`
+	ReplyToID int64         `json:"reply_to_id,omitempty"` // client -> server: which message is being replied to
+	Reply     *ReplyPreview `json:"reply,omitempty"`       // server -> client: resolved preview of that message
+	History   []Message     `json:"history,omitempty"`
 }
 
 const (
@@ -55,6 +67,14 @@ const (
 	minPasswordLen = 4
 )
 
+const (
+	sessionCookie   = "chat_session"
+	sessionTTL      = 30 * 24 * time.Hour
+	replyPreviewLen = 120
+)
+
+var errNoSession = errors.New("no valid session")
+
 // Client represents one connected websocket connection.
 // Every write to conn goes through the send channel and is handled by a
 // single writePump goroutine per client, so broadcasts, pings, and the
@@ -64,9 +84,10 @@ const (
 // person logged in from phone and laptop) - that's safe now because the
 // username is password-protected, not just claimed by whoever types it first.
 type Client struct {
-	conn     *websocket.Conn
-	send     chan Message
-	username string
+	conn      *websocket.Conn
+	send      chan Message
+	username  string
+	tokenHash string // which login session this socket belongs to (for logout)
 }
 
 // Hub owns all shared state: connected clients and an in-memory cache of
@@ -81,7 +102,9 @@ type Hub struct {
 }
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // allow LAN/public clients
+	// Cookie-authenticated sockets must only be opened by our own pages
+	// (blocks cross-site WebSocket hijacking). Non-browser clients send no Origin.
+	CheckOrigin: sameOrigin,
 }
 
 func newHub(db *sql.DB) *Hub {
@@ -95,7 +118,9 @@ func (h *Hub) loadHistory(ctx context.Context) error {
 	defer cancel()
 
 	rows, err := h.db.QueryContext(ctx,
-		`SELECT id, username, text, created_at FROM messages ORDER BY id DESC LIMIT $1`,
+		`SELECT m.id, m.username, m.text, m.created_at, m.reply_to, r.username, r.text
+		 FROM messages m LEFT JOIN messages r ON r.id = m.reply_to
+		 ORDER BY m.id DESC LIMIT $1`,
 		maxHistory,
 	)
 	if err != nil {
@@ -106,10 +131,20 @@ func (h *Hub) loadHistory(ctx context.Context) error {
 	var loaded []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.Username, &m.Text, &m.Timestamp); err != nil {
+		var replyID sql.NullInt64
+		var ru, rt sql.NullString
+		if err := rows.Scan(&m.ID, &m.Username, &m.Text, &m.Timestamp, &replyID, &ru, &rt); err != nil {
 			return fmt.Errorf("scan history row: %w", err)
 		}
 		m.Type = "message"
+		if replyID.Valid {
+			m.ReplyToID = replyID.Int64
+			if ru.Valid {
+				m.Reply = &ReplyPreview{ID: replyID.Int64, Username: ru.String, Text: previewOf(rt.String)}
+			} else {
+				m.Reply = &ReplyPreview{ID: replyID.Int64, Deleted: true} // original was deleted
+			}
+		}
 		loaded = append(loaded, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -189,6 +224,124 @@ func (h *Hub) authenticate(ctx context.Context, username, password string) (cano
 	return finalUsername, true, nil
 }
 
+// previewOf truncates quoted text for the reply snippet.
+func previewOf(text string) string {
+	r := []rune(text)
+	if len(r) > replyPreviewLen {
+		return string(r[:replyPreviewLen]) + "…"
+	}
+	return text
+}
+
+// setReplyPreviewLocked refreshes the cached preview on every message that
+// replies to id. Callers must hold h.mu. It swaps in a new pointer instead of
+// mutating the old one, because earlier snapshots may still be marshalling it.
+func (h *Hub) setReplyPreviewLocked(id int64, p ReplyPreview) {
+	for i := range h.history {
+		if h.history[i].ReplyToID == id {
+			cp := p
+			h.history[i].Reply = &cp
+		}
+	}
+}
+
+// ensureSchema applies the idempotent migrations this version needs:
+// a reply_to column on messages and a sessions table.
+func (h *Hub) ensureSchema(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	for _, stmt := range []string{
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to BIGINT`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			token_hash TEXT PRIMARY KEY,
+			username   TEXT NOT NULL,
+			created_at BIGINT NOT NULL,
+			expires_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires_at)`,
+	} {
+		if _, err := h.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	return nil
+}
+
+// hashToken returns the SHA-256 of a session token. Only the hash is stored,
+// so a database leak doesn't hand out usable sessions.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// createSession issues a new random 256-bit token and stores its hash.
+func (h *Hub) createSession(ctx context.Context, username string) (string, time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", time.Time{}, fmt.Errorf("generate token: %w", err)
+	}
+	token := hex.EncodeToString(buf)
+	now := time.Now()
+	expires := now.Add(sessionTTL)
+
+	if _, err := h.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= $1`, now.Unix()); err != nil {
+		log.Printf("expired session cleanup failed: %v", err) // non-fatal
+	}
+	if _, err := h.db.ExecContext(ctx,
+		`INSERT INTO sessions (token_hash, username, created_at, expires_at) VALUES ($1, $2, $3, $4)`,
+		hashToken(token), username, now.Unix(), expires.Unix(),
+	); err != nil {
+		return "", time.Time{}, fmt.Errorf("store session: %w", err)
+	}
+	return token, expires, nil
+}
+
+// sessionFromRequest resolves the session cookie to a username. It returns
+// errNoSession when the cookie is missing, unknown or expired, and any other
+// error for infrastructure failures (so a DB blip isn't mistaken for an expired login).
+func (h *Hub) sessionFromRequest(r *http.Request) (username, tokenHash string, err error) {
+	c, cerr := r.Cookie(sessionCookie)
+	if cerr != nil || c.Value == "" {
+		return "", "", errNoSession
+	}
+	tokenHash = hashToken(c.Value)
+
+	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
+	defer cancel()
+	qerr := h.db.QueryRowContext(ctx,
+		`SELECT username FROM sessions WHERE token_hash = $1 AND expires_at > $2`,
+		tokenHash, time.Now().Unix(),
+	).Scan(&username)
+	if qerr == sql.ErrNoRows {
+		return "", "", errNoSession
+	}
+	if qerr != nil {
+		return "", "", fmt.Errorf("lookup session: %w", qerr)
+	}
+	return username, tokenHash, nil
+}
+
+func (h *Hub) deleteSession(ctx context.Context, tokenHash string) error {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	_, err := h.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
+	return err
+}
+
+// kickSession closes every live socket that belongs to a logged-out session.
+func (h *Hub) kickSession(tokenHash string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.tokenHash == tokenHash {
+			c.conn.Close() // readPump unwinds and calls removeClient
+		}
+	}
+}
+
 // addClient adds an already-authenticated client to the active set.
 // No uniqueness check here - a verified username can have several
 // simultaneous connections (multiple devices, same identity).
@@ -227,21 +380,40 @@ func (h *Hub) snapshot() []Message {
 // then mirrors it into the in-memory cache. The message is only broadcast
 // by the caller if this succeeds, so nothing reaches other clients without
 // being durably saved first.
-func (h *Hub) addMessage(ctx context.Context, username, text string) (Message, error) {
+func (h *Hub) addMessage(ctx context.Context, username, text string, replyToID int64) (Message, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
+
+	// Resolve the quoted message server-side. If it no longer exists the
+	// text is still sent, just as a plain (non-reply) message.
+	var preview *ReplyPreview
+	var replyArg interface{}
+	if replyToID > 0 {
+		var ru, rt string
+		err := h.db.QueryRowContext(ctx, `SELECT username, text FROM messages WHERE id = $1`, replyToID).Scan(&ru, &rt)
+		switch {
+		case err == nil:
+			preview = &ReplyPreview{ID: replyToID, Username: ru, Text: previewOf(rt)}
+			replyArg = replyToID
+		case err != sql.ErrNoRows:
+			return Message{}, fmt.Errorf("lookup reply target: %w", err)
+		}
+	}
 
 	ts := time.Now().Unix()
 	var id int64
 	err := h.db.QueryRowContext(ctx,
-		`INSERT INTO messages (username, text, created_at) VALUES ($1, $2, $3) RETURNING id`,
-		username, text, ts,
+		`INSERT INTO messages (username, text, created_at, reply_to) VALUES ($1, $2, $3, $4) RETURNING id`,
+		username, text, ts, replyArg,
 	).Scan(&id)
 	if err != nil {
 		return Message{}, fmt.Errorf("insert message: %w", err)
 	}
 
-	msg := Message{Type: "message", ID: id, Username: username, Text: text, Timestamp: ts}
+	msg := Message{Type: "message", ID: id, Username: username, Text: text, Timestamp: ts, Reply: preview}
+	if preview != nil {
+		msg.ReplyToID = preview.ID
+	}
 
 	h.mu.Lock()
 	h.history = append(h.history, msg)
@@ -289,6 +461,7 @@ func (h *Hub) applyEdit(ctx context.Context, id int64, username, text string) (M
 			break
 		}
 	}
+	h.setReplyPreviewLocked(id, ReplyPreview{ID: id, Username: username, Text: previewOf(text)})
 	h.mu.Unlock()
 
 	return updated, true, nil
@@ -323,6 +496,7 @@ func (h *Hub) deleteMessage(ctx context.Context, id int64, username string) (boo
 			break
 		}
 	}
+	h.setReplyPreviewLocked(id, ReplyPreview{ID: id, Deleted: true})
 	h.mu.Unlock()
 
 	return true, nil
@@ -399,7 +573,7 @@ func (c *Client) readPump(hub *Hub) {
 			if in.Text == "" {
 				continue
 			}
-			msg, err := hub.addMessage(context.Background(), c.username, in.Text)
+			msg, err := hub.addMessage(context.Background(), c.username, in.Text, in.ReplyToID)
 			if err != nil {
 				log.Printf("failed to store message from %s: %v", c.username, err)
 				continue // don't broadcast anything that wasn't actually saved
@@ -437,81 +611,181 @@ func (c *Client) readPump(hub *Hub) {
 	}
 }
 
-// handleConnections upgrades HTTP to WebSocket, then authenticates the
-// connection via repeated "join" (username+password) attempts before
-// starting the read/write pumps.
+// sameOrigin reports whether a request's Origin header (if any) matches the
+// host it was sent to. Used for the websocket handshake and state-changing POSTs.
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // non-browser client
+	}
+	u, err := url.Parse(origin)
+	return err == nil && strings.EqualFold(u.Host, r.Host)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func apiError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func isSecure(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// The session cookie is HttpOnly (invisible to page JavaScript, so XSS can't
+// steal it), SameSite=Lax (not sent on cross-site requests) and Secure over HTTPS.
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: token, Path: "/",
+		Expires: expires, MaxAge: int(time.Until(expires).Seconds()),
+		HttpOnly: true, Secure: isSecure(r), SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: isSecure(r), SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// requirePost rejects anything but a same-origin POST.
+func requirePost(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		apiError(w, http.StatusMethodNotAllowed, "Method not allowed.")
+		return false
+	}
+	if !sameOrigin(r) {
+		apiError(w, http.StatusForbidden, "Forbidden.")
+		return false
+	}
+	return true
+}
+
+// handleLogin: POST {username, password}. Same rules as before (first use of
+// a name registers it), but on success it starts a persistent cookie session.
+func handleLogin(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	if !requirePost(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apiError(w, http.StatusBadRequest, "Invalid request.")
+		return
+	}
+
+	name := strings.TrimSpace(req.Username)
+	if name == "" {
+		apiError(w, http.StatusBadRequest, "Please enter a name.")
+		return
+	}
+	if len(name) > 30 {
+		name = name[:30]
+	}
+	if len(req.Password) < minPasswordLen {
+		apiError(w, http.StatusBadRequest, fmt.Sprintf("Password must be at least %d characters.", minPasswordLen))
+		return
+	}
+
+	canonical, ok, err := hub.authenticate(r.Context(), name, req.Password)
+	if err != nil {
+		log.Printf("auth error for %q: %v", name, err)
+		apiError(w, http.StatusInternalServerError, "Server error, please try again.")
+		return
+	}
+	if !ok {
+		apiError(w, http.StatusUnauthorized, "Incorrect password for that username.")
+		return
+	}
+
+	token, expires, err := hub.createSession(r.Context(), canonical)
+	if err != nil {
+		log.Printf("session error for %q: %v", canonical, err)
+		apiError(w, http.StatusInternalServerError, "Server error, please try again.")
+		return
+	}
+	setSessionCookie(w, r, token, expires)
+	writeJSON(w, http.StatusOK, map[string]string{"username": canonical})
+}
+
+// handleLogout: POST. Deletes the session server-side, closes its live
+// sockets, and clears the cookie.
+func handleLogout(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	if !requirePost(w, r) {
+		return
+	}
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+		hash := hashToken(c.Value)
+		if err := hub.deleteSession(r.Context(), hash); err != nil {
+			log.Printf("logout failed: %v", err)
+			apiError(w, http.StatusInternalServerError, "Could not log out, please try again.")
+			return
+		}
+		hub.kickSession(hash)
+	}
+	clearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleSession: GET. 200 {username} if the cookie is a live session, 401 otherwise.
+func handleSession(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	username, _, err := hub.sessionFromRequest(r)
+	switch {
+	case errors.Is(err, errNoSession):
+		clearSessionCookie(w, r) // drop a stale cookie
+		apiError(w, http.StatusUnauthorized, "Not logged in.")
+	case err != nil:
+		log.Printf("session check failed: %v", err)
+		apiError(w, http.StatusServiceUnavailable, "Server error, please try again.")
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"username": username})
+	}
+}
+
+// handleConnections authenticates the session cookie *before* upgrading, so
+// unauthenticated requests never get a socket, then starts the pumps.
 func handleConnections(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	username, tokenHash, err := hub.sessionFromRequest(r)
+	if err != nil {
+		if errors.Is(err, errNoSession) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		} else {
+			log.Printf("ws session check failed: %v", err)
+			http.Error(w, "server error", http.StatusServiceUnavailable)
+		}
+		return
+	}
+
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("upgrade error:", err)
 		return
 	}
 
-	var client *Client
-	for {
-		var join Message
-		if err := ws.ReadJSON(&join); err != nil {
-			ws.Close()
-			return
-		}
-		if join.Type != "join" {
-			continue // ignore anything before a valid join attempt
-		}
-
-		name := strings.TrimSpace(join.Username)
-		if name == "" {
-			if err := ws.WriteJSON(Message{Type: "join_error", Text: "Please enter a name."}); err != nil {
-				ws.Close()
-				return
-			}
-			continue
-		}
-		if len(name) > 30 {
-			name = name[:30]
-		}
-		if len(join.Password) < minPasswordLen {
-			if err := ws.WriteJSON(Message{Type: "join_error", Text: fmt.Sprintf("Password must be at least %d characters.", minPasswordLen)}); err != nil {
-				ws.Close()
-				return
-			}
-			continue
-		}
-
-		canonical, ok, authErr := hub.authenticate(context.Background(), name, join.Password)
-		if authErr != nil {
-			log.Printf("auth error for %q: %v", name, authErr)
-			if err := ws.WriteJSON(Message{Type: "join_error", Text: "Server error, please try again."}); err != nil {
-				ws.Close()
-				return
-			}
-			continue
-		}
-		if !ok {
-			if err := ws.WriteJSON(Message{Type: "join_error", Text: "Incorrect password for that username."}); err != nil {
-				ws.Close()
-				return
-			}
-			continue
-		}
-
-		client = &Client{
-			conn:     ws,
-			send:     make(chan Message, sendBufferSize),
-			username: canonical,
-		}
-		hub.addClient(client)
-		break
+	client := &Client{
+		conn:      ws,
+		send:      make(chan Message, sendBufferSize),
+		username:  username,
+		tokenHash: tokenHash,
 	}
-
+	hub.addClient(client)
 	log.Printf("Client connected: %s (%s)", ws.RemoteAddr(), client.username)
 
 	go client.writePump()
 
-	// Push history, then confirm the join, both via this client's own send
-	// channel so they're serialized with everything else written to this
-	// connection (writePump is now the only goroutine writing to ws).
-	client.send <- Message{Type: "history", History: hub.snapshot()}
+	// "joined" first so the client knows its own name before rendering history.
 	client.send <- Message{Type: "joined", Username: client.username}
+	client.send <- Message{Type: "history", History: hub.snapshot()}
 
 	client.readPump(hub)
 }
@@ -527,6 +801,11 @@ func getLocalIP() string {
 }
 
 func main() {
+	// Loads variables from a local .env file, if one exists, into the
+	// process environment. Silently does nothing if the file is missing -
+	// that's the normal case on Render, which injects env vars directly.
+	_ = godotenv.Load()
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		log.Fatal("DATABASE_URL is not set - point it at your Supabase Postgres connection string")
@@ -553,6 +832,9 @@ func main() {
 	cancel()
 
 	hub := newHub(db)
+	if err := hub.ensureSchema(context.Background()); err != nil {
+		log.Fatal("failed to migrate schema: ", err)
+	}
 	if err := hub.loadHistory(context.Background()); err != nil {
 		log.Fatal("failed to load chat history: ", err)
 	}
@@ -560,6 +842,11 @@ func main() {
 	// Static route - serves files from the ./static folder at "/"
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/", fs)
+
+	// Auth routes
+	http.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) { handleLogin(hub, w, r) })
+	http.HandleFunc("/api/logout", func(w http.ResponseWriter, r *http.Request) { handleLogout(hub, w, r) })
+	http.HandleFunc("/api/session", func(w http.ResponseWriter, r *http.Request) { handleSession(hub, w, r) })
 
 	// WebSocket route
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {

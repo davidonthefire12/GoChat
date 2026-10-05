@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>LAN Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { box-sizing: border-box; }
 
@@ -13,7 +16,7 @@
         }
 
         body {
-            font-family: Arial, sans-serif;
+            font-family: 'Nunito', 'Segoe UI', Arial, sans-serif;
             display: flex;
             flex-direction: column;
             max-width: 600px;
@@ -22,38 +25,46 @@
             padding: 20px;
             padding-top: max(20px, env(safe-area-inset-top));
             padding-bottom: max(20px, env(safe-area-inset-bottom));
+            background: linear-gradient(160deg, #f3f0ff 0%, #eef5ff 100%);
+            color: #2d2d3a;
         }
 
         h2 {
             margin: 0 0 16px 0;
-            font-size: 1.4em;
+            font-size: 1.5em;
+            font-weight: 800;
+            text-align: center;
+            background: linear-gradient(90deg, #7c5cff, #4e8cff);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
         }
 
+        /* ---------- Join screen ---------- */
         #join {
             display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        #join input {
-            flex: 1;
-            min-width: 150px;
+            flex-direction: column;
+            gap: 10px;
+            background: #fff;
+            padding: 20px;
+            border-radius: 18px;
+            box-shadow: 0 8px 24px rgba(90, 70, 190, 0.12);
         }
 
         #joinError {
-            width: 100%;
-            color: #c22;
+            color: #e6435c;
             font-size: 0.85em;
             min-height: 1.2em;
+            font-weight: 600;
         }
 
         #joinHint {
-            width: 100%;
-            color: #888;
+            color: #8a8a9a;
             font-size: 0.8em;
-            margin-top: 2px;
+            margin-top: -4px;
         }
 
+        /* ---------- Chat shell ---------- */
         #chat {
             display: flex;
             flex-direction: column;
@@ -61,120 +72,208 @@
             min-height: 0;
         }
 
+        #status {
+            font-size: 0.8em;
+            color: #8a8a9a;
+            margin-bottom: 8px;
+            min-height: 1.2em;
+            text-align: center;
+            font-weight: 600;
+        }
+
         #messages {
             flex: 1;
             min-height: 200px;
             overflow-y: auto;
-            border: 1px solid #ccc;
-            padding: 10px;
-            margin-bottom: 10px;
-            border-radius: 5px;
+            background: #fff;
+            padding: 14px;
+            margin-bottom: 12px;
+            border-radius: 18px;
+            box-shadow: 0 8px 24px rgba(90, 70, 190, 0.10);
             -webkit-overflow-scrolling: touch;
-            scroll-behavior: smooth;
         }
 
+        /* ---------- Message bubbles ---------- */
         .msg {
             position: relative;
-            margin-bottom: 8px;
+            display: flex;
+            align-items: flex-end;
+            gap: 8px;
+            margin-bottom: 14px;
+            cursor: pointer;
+        }
+
+        .msg.own {
+            justify-content: flex-end;
+        }
+
+        .msg.other {
+            justify-content: flex-start;
+        }
+
+        .avatar {
+            flex: none;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-weight: 700;
+            font-size: 0.8em;
+        }
+
+        .bubble-col {
+            display: flex;
+            flex-direction: column;
+            max-width: 75%;
+        }
+
+        .msg.own .bubble-col {
+            align-items: flex-end;
+        }
+
+        .msg.other .bubble-col {
+            align-items: flex-start;
+        }
+
+        .bubble {
+            padding: 9px 13px;
+            border-radius: 16px;
             word-wrap: break-word;
             overflow-wrap: break-word;
             line-height: 1.4;
-            cursor: pointer;
-            padding: 4px 6px;
-            border-radius: 6px;
+            transition: filter 0.1s;
         }
 
-        .msg:hover {
-            background: #f5f5f5;
+        .msg.own .bubble {
+            background: linear-gradient(135deg, #7c5cff, #5a8dff);
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+
+        .msg.other .bubble {
+            background: #f1f0fa;
+            color: #2d2d3a;
+            border-bottom-left-radius: 4px;
+        }
+
+        .msg:hover .bubble {
+            filter: brightness(0.97);
         }
 
         .username {
-            font-weight: bold;
-            color: #0066cc;
+            display: block;
+            font-weight: 700;
+            font-size: 0.72em;
+            color: #7c5cff;
+            margin-bottom: 2px;
+        }
+
+        .meta {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            margin-top: 3px;
+            padding: 0 2px;
         }
 
         .timestamp {
-            font-size: 0.7em;
-            color: #999;
-            margin-left: 6px;
+            font-size: 0.68em;
+            color: #a9a9b8;
             white-space: nowrap;
         }
 
         .edited-tag {
-            font-size: 0.75em;
-            color: #999;
+            font-size: 0.68em;
+            color: #a9a9b8;
             font-style: italic;
-            margin-left: 4px;
         }
 
+        /* ---------- Action popover (Edit / Delete) ---------- */
         .action-menu {
             position: absolute;
-            top: 100%;
-            left: 6px;
-            margin-top: 4px;
+            bottom: calc(100% + 6px);
             display: flex;
             gap: 4px;
             background: #fff;
-            border: 1px solid #ccc;
-            border-radius: 6px;
+            border-radius: 999px;
             padding: 4px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+            box-shadow: 0 6px 18px rgba(40, 20, 90, 0.22);
             z-index: 20;
         }
 
+        .msg.own .action-menu {
+            right: 0;
+        }
+
+        .msg.other .action-menu {
+            left: 38px;
+        }
+
         .action-menu button {
-            font-size: 0.8em;
-            padding: 5px 12px;
-            background: #eee;
-            color: #333;
-            border: 1px solid #ccc;
-            border-radius: 4px;
+            font-size: 0.78em;
+            font-weight: 700;
+            padding: 6px 14px;
+            background: #f1f0fa;
+            color: #4b4b63;
+            border: none;
+            border-radius: 999px;
             cursor: pointer;
         }
 
         .action-menu button:active {
-            background: #ddd;
+            background: #e2e0f5;
         }
 
         .edit-input {
             font-size: 14px;
-            padding: 3px 6px;
-            border: 1px solid #0066cc;
-            border-radius: 4px;
-            width: 70%;
+            font-family: inherit;
+            padding: 5px 9px;
+            border: none;
+            border-radius: 10px;
+            width: 100%;
+            min-width: 140px;
         }
 
+        /* ---------- Input row ---------- */
         #inputRow {
             display: flex;
+            align-items: center;
             gap: 8px;
             position: relative;
+            background: #fff;
+            border-radius: 999px;
+            padding: 6px 6px 6px 16px;
+            box-shadow: 0 8px 24px rgba(90, 70, 190, 0.12);
         }
 
         #emojiBtn {
-            background: #eee;
+            background: none;
             color: #333;
-            padding: 10px 12px;
-            font-size: 18px;
+            padding: 6px;
+            font-size: 20px;
             flex: none;
+            box-shadow: none;
         }
 
         #emojiBtn:active {
-            background: #ddd;
+            transform: scale(0.9);
         }
 
         #emojiPicker {
             display: none;
             position: absolute;
-            bottom: calc(100% + 8px);
+            bottom: calc(100% + 10px);
             left: 0;
             width: 280px;
             max-height: 240px;
             overflow-y: auto;
             background: #fff;
-            border: 1px solid #ccc;
-            border-radius: 8px;
+            border-radius: 16px;
             padding: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            box-shadow: 0 10px 28px rgba(40, 20, 90, 0.22);
             grid-template-columns: repeat(7, 1fr);
             gap: 4px;
             z-index: 10;
@@ -187,7 +286,8 @@
         #emojiPicker .emoji-label {
             grid-column: 1 / -1;
             font-size: 0.7em;
-            color: #999;
+            font-weight: 700;
+            color: #a9a9b8;
             text-transform: uppercase;
             letter-spacing: 0.03em;
             margin: 6px 0 2px 2px;
@@ -202,49 +302,110 @@
             padding: 4px;
             font-size: 20px;
             line-height: 1;
-            border-radius: 4px;
+            border-radius: 8px;
         }
 
         #emojiPicker button:active,
         #emojiPicker button:hover {
-            background: #eee;
+            background: #f1f0fa;
         }
 
         input[type=text],
         input[type=password] {
-            padding: 10px;
+            padding: 10px 14px;
             font-size: 16px; /* prevents iOS auto-zoom on focus */
-            border: 1px solid #ccc;
-            border-radius: 5px;
+            font-family: inherit;
+            border: 1.5px solid #e4e2f3;
+            border-radius: 999px;
             width: 100%;
+            background: #faf9ff;
+        }
+
+        input[type=text]:focus,
+        input[type=password]:focus {
+            outline: none;
+            border-color: #a99cff;
+            background: #fff;
         }
 
         #msgInput {
             flex: 1;
             min-width: 0;
+            border: none;
+            background: none;
+            padding: 8px 4px;
+        }
+
+        #msgInput:focus {
+            border: none;
+            background: none;
         }
 
         button {
-            padding: 10px 16px;
+            padding: 10px 18px;
             font-size: 16px;
+            font-family: inherit;
+            font-weight: 700;
             border: none;
-            border-radius: 5px;
-            background: #0066cc;
+            border-radius: 999px;
+            background: linear-gradient(135deg, #7c5cff, #5a8dff);
             color: #fff;
             cursor: pointer;
             white-space: nowrap;
+            box-shadow: 0 4px 12px rgba(90, 70, 255, 0.25);
         }
 
         button:active {
-            background: #004c99;
+            transform: scale(0.97);
+            filter: brightness(0.95);
         }
 
-        #status {
-            font-size: 0.85em;
-            color: #888;
-            margin-bottom: 8px;
-            min-height: 1.2em;
+        #inputRow button {
+            flex: none;
+            width: 44px;
+            height: 44px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
         }
+
+        /* ---------- Header / session ---------- */
+        #chatHeader { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        #chatHeader #status { flex: 1; margin: 0; text-align: left; }
+        #whoami { font-size: 0.8em; font-weight: 700; color: #5b5b73; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #logoutBtn { padding: 6px 12px; font-size: 0.8em; background: #f1f0fa; color: #6a4fe0; box-shadow: none; }
+
+        /* ---------- Scroll container + "new messages" pill ---------- */
+        #messagesWrap { position: relative; flex: 1; min-height: 200px; margin-bottom: 12px; display: flex; flex-direction: column; }
+        #messages { min-height: 0; margin-bottom: 0; overscroll-behavior: contain; }
+        #newMsgBtn { display: none; position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); padding: 6px 14px; font-size: 0.8em; z-index: 5; }
+        #newMsgBtn.show { display: block; }
+
+        /* ---------- Replies ---------- */
+        .reply-btn { flex: none; align-self: center; width: 26px; height: 26px; padding: 0; font-size: 14px; line-height: 1;
+            background: #f1f0fa; color: #7c5cff; box-shadow: none; opacity: 0; transition: opacity 0.12s; }
+        .msg:hover .reply-btn, .reply-btn:focus-visible { opacity: 1; }
+        @media (hover: none) { .reply-btn { opacity: 0.7; } }
+
+        .reply-quote { border-left: 3px solid #7c5cff; background: rgba(124, 92, 255, 0.10); border-radius: 8px;
+            padding: 5px 8px; margin-bottom: 6px; font-size: 0.82em; cursor: pointer; }
+        .msg.own .reply-quote { border-left-color: rgba(255, 255, 255, 0.85); background: rgba(255, 255, 255, 0.18); }
+        .rq-name { display: block; font-weight: 700; font-size: 0.9em; }
+        .rq-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; opacity: 0.85; }
+        .reply-quote.deleted { cursor: default; }
+        .reply-quote.deleted .rq-text { font-style: italic; }
+        .msg.flash .bubble { animation: flash 1.2s ease-out; }
+        @keyframes flash { 0%, 100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.45); } }
+        .msg:first-child .action-menu { bottom: auto; top: calc(100% + 6px); }
+
+        #replyBar { align-items: center; gap: 8px; background: #fff; border-left: 4px solid #7c5cff; border-radius: 12px;
+            padding: 8px 8px 8px 12px; margin-bottom: 8px; box-shadow: 0 4px 14px rgba(90, 70, 190, 0.10); }
+        .reply-bar-body { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 0.85em; }
+        #replyName { font-weight: 700; color: #7c5cff; }
+        #replyText { color: #6b6b80; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #replyCancel { flex: none; width: 28px; height: 28px; padding: 0; font-size: 13px; background: #f1f0fa; color: #6b6b80; box-shadow: none; }
 
         /* Small phones: use full height, drop side margins */
         @media (max-width: 480px) {
@@ -257,50 +418,75 @@
             }
 
             h2 {
-                font-size: 1.2em;
-                text-align: center;
-            }
-
-            #join {
-                flex-direction: column;
+                font-size: 1.3em;
             }
 
             #join button {
                 width: 100%;
             }
 
-            button {
-                padding: 12px 16px;
+            .bubble-col {
+                max-width: 85%;
             }
         }
     </style>
 </head>
 <body>
     <h2>💬 LAN Chat</h2>
-    <div id="join">
-        <input type="text" id="nameInput" placeholder="Your name" maxlength="30"
+    <div id="join" style="display:none;">
+        <input type="text" id="nameInput" placeholder="Your name" maxlength="30" autocomplete="username"
                onkeydown="if(event.key==='Enter') joinChat()" />
-        <input type="password" id="passInput" placeholder="Password" maxlength="100"
+        <input type="password" id="passInput" placeholder="Password" maxlength="100" autocomplete="current-password"
                onkeydown="if(event.key==='Enter') joinChat()" />
-        <button onclick="joinChat()">Join</button>
+        <button id="joinBtn" onclick="joinChat()">Join the chat</button>
         <div id="joinHint">First time using this name? That password will be set for it - use the same one to log back in from any device.</div>
         <div id="joinError"></div>
     </div>
     <div id="chat" style="display:none;">
-        <div id="status"></div>
-        <div id="messages"></div>
+        <div id="chatHeader">
+            <div id="status"></div>
+            <span id="whoami"></span>
+            <button type="button" id="logoutBtn" onclick="logout()">Log out</button>
+        </div>
+        <div id="messagesWrap">
+            <div id="messages"></div>
+            <button type="button" id="newMsgBtn" onclick="scrollToBottom(true)">↓ New messages</button>
+        </div>
+        <div id="replyBar" style="display:none;">
+            <div class="reply-bar-body">
+                <span id="replyName"></span>
+                <span id="replyText"></span>
+            </div>
+            <button type="button" id="replyCancel" aria-label="Cancel reply" onclick="clearReply()">✕</button>
+        </div>
         <div id="inputRow">
             <div id="emojiPicker"></div>
             <button type="button" id="emojiBtn" onclick="toggleEmojiPicker()">😊</button>
-            <input type="text" id="msgInput" placeholder="Type message..." maxlength="1000"
-                   onkeydown="if(event.key==='Enter') sendMessage()" />
-            <button onclick="sendMessage()">Send</button>
+            <input type="text" id="msgInput" placeholder="Type a message…" maxlength="1000"
+                   onkeydown="if(event.key==='Enter') sendMessage(); else if(event.key==='Escape') clearReply()" />
+            <button onclick="sendMessage()">➤</button>
         </div>
     </div>
     <script>
         let ws;
         let username = '';
         let editingId = null; // only one message editable at a time
+        let replyingTo = null; // {id, username, text} of the message being replied to
+
+        // Session / connection state
+        let authed = false;
+        let intentionalClose = false;
+        let reconnectTimer = null;
+        let reconnectDelay = 1000;
+        let initialLoad = true;
+
+        // Scroll state. stickToBottom is true while the reader is at (or
+        // near) the bottom; it's what stops new messages from yanking
+        // someone who scrolled up to read older ones.
+        let stickToBottom = true;
+        let autoScrolling = false; // true while our own scroll animation runs
+        let autoScrollTimer = null;
+        const REPLY_PREVIEW_LEN = 120;
 
         // --- New-message notifications ---------------------------------
         const originalTitle = document.title;
@@ -462,53 +648,124 @@
         // visible viewport, which can leave the latest message hidden
         // behind it even though scrollTop was already correct. Re-anchor
         // to the bottom whenever that happens, and when the input gets focus.
+        // Only re-anchor if the reader was already at the bottom, never while reading history.
+        function reanchor() { if (stickToBottom) scrollToBottom(false); }
         if (window.visualViewport) {
-            window.visualViewport.addEventListener('resize', scrollToBottom);
+            window.visualViewport.addEventListener('resize', reanchor);
         }
-        document.getElementById('msgInput').addEventListener('focus', scrollToBottom);
+        document.getElementById('msgInput').addEventListener('focus', reanchor);
 
-        let lastAttemptedName = '';
-        let lastAttemptedPassword = '';
-        let joined = false;
+        // ---------------- Session / auth ----------------
+        // The session itself lives in an HttpOnly cookie set by the server, so
+        // no token is ever readable by (or stored by) page JavaScript.
+        async function api(path, body) {
+            const res = await fetch(path, {
+                method: body === undefined ? 'GET' : 'POST',
+                headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+                body: body === undefined ? undefined : JSON.stringify(body),
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+            let data = {};
+            try { data = await res.json(); } catch (err) { /* empty body */ }
+            return { ok: res.ok, status: res.status, data: data };
+        }
 
-        function joinChat() {
+        // Runs on page load: a valid cookie goes straight to the chat.
+        async function boot() {
+            try {
+                const r = await api('/api/session');
+                if (r.ok) { enterChat(r.data.username); return; }
+                showLogin('');
+            } catch (err) {
+                showLogin("Can't reach the server. Check your connection and refresh.");
+            }
+        }
+
+        function enterChat(name) {
+            username = name;
+            authed = true;
+            intentionalClose = false;
+            initialLoad = true;
+            reconnectDelay = 1000;
+            document.getElementById('whoami').textContent = name;
+            document.getElementById('join').style.display = 'none';
+            document.getElementById('chat').style.display = 'flex';
+            hideJoinError();
+            connect();
+        }
+
+        function showLogin(message) {
+            document.getElementById('chat').style.display = 'none';
+            document.getElementById('join').style.display = 'flex';
+            document.getElementById('passInput').value = '';
+            showJoinError(message || '');
+        }
+
+        // Tears down all per-session state, then shows the login form.
+        function leaveChat(message) {
+            authed = false;
+            intentionalClose = true;
+            clearTimeout(reconnectTimer);
+            if (ws) { ws.close(); ws = null; }
+            document.getElementById('messages').innerHTML = '';
+            closeActionMenu();
+            clearReply();
+            setPill(false);
+            username = '';
+            showLogin(message);
+        }
+
+        async function joinChat() {
             const name = document.getElementById('nameInput').value.trim();
             const pass = document.getElementById('passInput').value;
-            if (!name) {
-                showJoinError('Enter your name');
-                return;
-            }
-            if (pass.length < 4) {
-                showJoinError('Password must be at least 4 characters');
-                return;
-            }
+            if (!name) { showJoinError('Enter your name'); return; }
+            if (pass.length < 4) { showJoinError('Password must be at least 4 characters'); return; }
             hideJoinError();
-            lastAttemptedName = name;
-            lastAttemptedPassword = pass;
             requestNotificationPermission();
 
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                // Socket already open from a previous rejected attempt - just retry.
-                ws.send(JSON.stringify({ type: 'join', username: name, password: pass }));
-            } else {
-                connect();
+            const btn = document.getElementById('joinBtn');
+            btn.disabled = true;
+            try {
+                const r = await api('/api/login', { username: name, password: pass });
+                if (r.ok) {
+                    document.getElementById('passInput').value = '';
+                    enterChat(r.data.username);
+                } else {
+                    showJoinError(r.data.error || 'Login failed.');
+                }
+            } catch (err) {
+                showJoinError("Can't reach the server.");
+            } finally {
+                btn.disabled = false;
             }
+        }
+
+        async function logout() {
+            try {
+                const r = await api('/api/logout', {});
+                if (!r.ok) throw new Error('logout failed');
+            } catch (err) {
+                // Don't pretend we're logged out while the session is still alive server-side.
+                setStatus('Could not log out - check your connection.', '#e6435c');
+                return;
+            }
+            leaveChat('');
         }
 
         function connect() {
+            if (!authed) return;
             const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-            ws = new WebSocket(proto + '://' + location.host + '/ws');
+            const sock = new WebSocket(proto + '://' + location.host + '/ws');
+            ws = sock;
+            setStatus('Connecting…', '#8a8a9a');
 
-            ws.onopen = function() {
-                setStatus('Connecting…', '#888');
-                ws.send(JSON.stringify({
-                    type: 'join',
-                    username: lastAttemptedName,
-                    password: lastAttemptedPassword
-                }));
+            sock.onopen = function() {
+                reconnectDelay = 1000;
+                setStatus('Connected', '#2fb380');
             };
 
-            ws.onmessage = function(e) {
+            sock.onmessage = function(e) {
                 let msg;
                 try {
                     msg = JSON.parse(e.data);
@@ -517,29 +774,12 @@
                 }
 
                 if (msg.type === 'joined') {
-                    // Server is the source of truth for our username - only
-                    // now do we know the name/password combo was accepted.
-                    username = msg.username;
-                    joined = true;
-                    hideJoinError();
-                    document.getElementById('join').style.display = 'none';
-                    document.getElementById('chat').style.display = 'flex';
-                    setStatus('Connected', '#2a2');
-                } else if (msg.type === 'join_error') {
-                    // Rejected (bad name, wrong password, etc). The connection
-                    // stays open server-side, so the user can just retry.
-                    joined = false;
-                    document.getElementById('chat').style.display = 'none';
-                    document.getElementById('join').style.display = 'flex';
-                    showJoinError(msg.text);
+                    username = msg.username; // server is the source of truth for casing
+                    document.getElementById('whoami').textContent = username;
                 } else if (msg.type === 'history') {
-                    document.getElementById('messages').innerHTML = '';
-                    (msg.history || []).forEach(addMessage);
+                    handleHistory(msg.history || []);
                 } else if (msg.type === 'message') {
-                    addMessage(msg);
-                    if (msg.username.toLowerCase() !== username.toLowerCase()) {
-                        notifyNewMessage(msg);
-                    }
+                    handleIncoming(msg);
                 } else if (msg.type === 'edit') {
                     updateMessage(msg);
                 } else if (msg.type === 'delete') {
@@ -547,16 +787,56 @@
                 }
             };
 
-            ws.onclose = function() {
-                if (joined) {
-                    setStatus('Disconnected — reconnecting…', '#c22');
-                }
-                setTimeout(connect, 2000);
+            sock.onclose = function() {
+                if (sock !== ws || intentionalClose || !authed) return;
+                setStatus('Disconnected — reconnecting…', '#e6435c');
+                scheduleReconnect();
             };
 
-            ws.onerror = function() {
-                ws.close();
-            };
+            sock.onerror = function() { sock.close(); };
+        }
+
+        // Before every reconnect, ask the server whether the session is
+        // still valid. A 401 means it expired (or we logged out elsewhere),
+        // so go back to the login page instead of retrying forever.
+        function scheduleReconnect() {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(async function() {
+                if (!authed) return;
+                try {
+                    const r = await api('/api/session');
+                    if (r.status === 401) {
+                        leaveChat('Your session has expired. Please log in again.');
+                        return;
+                    }
+                } catch (err) { /* server unreachable - just try again */ }
+                connect();
+            }, reconnectDelay);
+            reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+        }
+
+        // Full history arrives on first connect and again after each
+        // reconnect. Jump to the bottom on first load; on a reconnect,
+        // leave a reader who scrolled up where they were.
+        function handleHistory(list) {
+            const el = document.getElementById('messages');
+            const follow = initialLoad || stickToBottom;
+            const prevTop = el.scrollTop;
+            closeActionMenu();
+            el.innerHTML = '';
+            list.forEach(addMessage);
+            if (follow) scrollToBottom(false); // instant: no point animating through hundreds of messages
+            else el.scrollTop = prevTop;
+            initialLoad = false;
+        }
+
+        function handleIncoming(msg) {
+            const own = msg.username.toLowerCase() === username.toLowerCase();
+            const follow = stickToBottom; // sample BEFORE the new bubble changes the geometry
+            addMessage(msg);
+            if (follow) scrollToBottom(true);
+            else if (!own) setPill(true); // reader is scrolled up: don't move them, just hint
+            if (!own) notifyNewMessage(msg);
         }
 
         function showJoinError(text) {
@@ -579,14 +859,18 @@
             if (!text) return;
 
             if (!ws || ws.readyState !== WebSocket.OPEN) {
-                setStatus('Not connected yet — hang on…', '#c22');
+                setStatus('Not connected yet — hang on…', '#e6435c');
                 return;
             }
 
-            ws.send(JSON.stringify({ type: 'message', text: text }));
+            const payload = { type: 'message', text: text };
+            if (replyingTo) payload.reply_to_id = replyingTo.id;
+            ws.send(JSON.stringify(payload));
             input.value = '';
+            clearReply();
             input.focus();
             clearUnread();
+            scrollToBottom(true); // sending always brings you back to the bottom
         }
 
         let selectedMessageId = null; // id of the message whose action menu is open, or null
@@ -603,30 +887,84 @@
             return hours.toString().padStart(2, '0') + ':' + minutes + ' ' + ampm;
         }
 
-        // Renders one message. All text goes through textContent (never
-        // innerHTML) so a username or message body can never be interpreted
-        // as HTML/script.
+        // Deterministic pastel-ish color per username, so the same person
+        // always gets the same avatar color across messages and sessions.
+        function colorForName(name) {
+            let hash = 0;
+            for (let i = 0; i < name.length; i++) {
+                hash = name.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const hue = Math.abs(hash) % 360;
+            return 'hsl(' + hue + ', 62%, 55%)';
+        }
+
+        // Renders one message as a chat bubble. All text goes through
+        // textContent (never innerHTML) so a username or message body can
+        // never be interpreted as HTML/script.
         function addMessage(m) {
+            const isOwn = m.username.toLowerCase() === username.toLowerCase();
+
             const div = document.createElement('div');
-            div.className = 'msg';
+            div.className = 'msg ' + (isOwn ? 'own' : 'other');
             div.dataset.id = m.id;
             div.dataset.username = m.username;
 
-            const userSpan = document.createElement('span');
-            userSpan.className = 'username';
-            userSpan.textContent = m.username + ': ';
+            if (!isOwn) {
+                const avatar = document.createElement('div');
+                avatar.className = 'avatar';
+                avatar.style.background = colorForName(m.username);
+                avatar.textContent = m.username.charAt(0).toUpperCase();
+                div.appendChild(avatar);
+            }
+
+            const col = document.createElement('div');
+            col.className = 'bubble-col';
+
+            const bubble = document.createElement('div');
+            bubble.className = 'bubble';
+
+            if (!isOwn) {
+                const userSpan = document.createElement('span');
+                userSpan.className = 'username';
+                userSpan.textContent = m.username;
+                bubble.appendChild(userSpan);
+            }
+
+            if (m.reply_to_id) {
+                bubble.appendChild(buildQuote(m.reply_to_id, m.reply));
+            }
 
             const textSpan = document.createElement('span');
             textSpan.className = 'text';
             textSpan.textContent = m.text;
+            bubble.appendChild(textSpan);
 
+            const meta = document.createElement('div');
+            meta.className = 'meta';
             const timeSpan = document.createElement('span');
             timeSpan.className = 'timestamp';
             timeSpan.textContent = formatTimestamp(m.timestamp);
+            meta.appendChild(timeSpan);
 
-            div.appendChild(userSpan);
-            div.appendChild(textSpan);
-            div.appendChild(timeSpan);
+            col.appendChild(bubble);
+            col.appendChild(meta);
+
+            // Reply button: beside the bubble, on the inner side (left of own
+            // messages, right of others'). Visible on hover, always on touch.
+            const replyBtn = document.createElement('button');
+            replyBtn.type = 'button';
+            replyBtn.className = 'reply-btn';
+            replyBtn.title = 'Reply';
+            replyBtn.setAttribute('aria-label', 'Reply to ' + m.username);
+            replyBtn.textContent = '↩';
+            replyBtn.addEventListener('click', function(e) {
+                e.stopPropagation(); // don't also toggle the action menu
+                startReply(div);
+            });
+
+            if (isOwn) div.appendChild(replyBtn);
+            div.appendChild(col);
+            if (!isOwn) div.appendChild(replyBtn);
 
             // Clicking the bubble toggles its action menu. stopPropagation
             // keeps this same click from also hitting the document-level
@@ -640,7 +978,6 @@
 
             const messages = document.getElementById('messages');
             messages.appendChild(div);
-            scrollToBottom();
         }
 
         // Opens (or closes, if already open) the Edit/Delete popover for one
@@ -663,7 +1000,7 @@
 
             const editBtn = document.createElement('button');
             editBtn.type = 'button';
-            editBtn.textContent = 'Edit';
+            editBtn.textContent = '✏️ Edit';
             editBtn.onclick = function(e) {
                 e.stopPropagation();
                 closeActionMenu();
@@ -676,7 +1013,7 @@
 
             const deleteBtn = document.createElement('button');
             deleteBtn.type = 'button';
-            deleteBtn.textContent = 'Delete';
+            deleteBtn.textContent = '🗑️ Delete';
             deleteBtn.onclick = function(e) {
                 e.stopPropagation();
                 closeActionMenu();
@@ -714,18 +1051,110 @@
         function removeMessage(id) {
             const div = document.querySelector('.msg[data-id="' + id + '"]');
             if (div) div.remove();
+            document.querySelectorAll('.reply-quote[data-reply-id="' + id + '"]').forEach(setQuoteDeleted);
+            if (replyingTo && replyingTo.id === id) clearReply();
         }
 
-        // Scrolls the message list to the very bottom. Deferred to the next
-        // animation frame so it runs after the browser has actually laid out
-        // the new/changed content (appending a node doesn't always update
-        // scrollHeight synchronously, especially right as the on-screen
-        // keyboard is resizing the viewport on mobile).
-        function scrollToBottom() {
+        function isNearBottom() {
+            const el = document.getElementById('messages');
+            return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        }
+
+        // Scrolls to the newest message. smooth=true animates (live events);
+        // false jumps instantly (first load, keyboard resize). Runs on the next
+        // frame so layout has settled. While our own animation plays, scroll
+        // events are ignored so its intermediate positions don't count as the
+        // reader "scrolling up".
+        function scrollToBottom(smooth) {
+            const el = document.getElementById('messages');
+            stickToBottom = true;
+            setPill(false);
+            autoScrolling = true;
+            clearTimeout(autoScrollTimer);
             requestAnimationFrame(function() {
-                const messages = document.getElementById('messages');
-                messages.scrollTop = messages.scrollHeight;
+                el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
+                autoScrollTimer = setTimeout(function() {
+                    autoScrolling = false;
+                    stickToBottom = isNearBottom();
+                }, smooth ? 600 : 50);
             });
+        }
+
+        function setPill(show) {
+            document.getElementById('newMsgBtn').classList.toggle('show', show);
+        }
+
+        document.getElementById('messages').addEventListener('scroll', function() {
+            if (autoScrolling) return;
+            stickToBottom = isNearBottom();
+            if (stickToBottom) setPill(false);
+        }, { passive: true });
+
+        // ---------------- Replies ----------------
+        function clip(t) {
+            return t.length > REPLY_PREVIEW_LEN ? t.slice(0, REPLY_PREVIEW_LEN) + '…' : t;
+        }
+
+        function setQuoteDeleted(q) {
+            q.classList.add('deleted');
+            q.querySelector('.rq-name').textContent = 'Reply';
+            q.querySelector('.rq-text').textContent = 'Original message was deleted';
+        }
+
+        // The quoted snippet shown above a reply. Text goes through textContent only.
+        function buildQuote(id, r) {
+            const q = document.createElement('div');
+            q.className = 'reply-quote';
+            q.dataset.replyId = id;
+            const name = document.createElement('span');
+            name.className = 'rq-name';
+            const text = document.createElement('span');
+            text.className = 'rq-text';
+            q.appendChild(name);
+            q.appendChild(text);
+            if (!r || r.deleted) {
+                setQuoteDeleted(q);
+            } else {
+                name.textContent = r.username;
+                text.textContent = r.text;
+                q.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    jumpToMessage(id);
+                });
+            }
+            return q;
+        }
+
+        // Scrolls the original into view and briefly highlights it (if it's still loaded).
+        function jumpToMessage(id) {
+            const target = document.querySelector('.msg[data-id="' + id + '"]');
+            if (!target) return;
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            target.classList.remove('flash');
+            void target.offsetWidth; // restart the animation
+            target.classList.add('flash');
+        }
+
+        function startReply(div) {
+            const textEl = div.querySelector('.text');
+            replyingTo = {
+                id: Number(div.dataset.id),
+                username: div.dataset.username,
+                text: clip(textEl ? textEl.textContent : '')
+            };
+            const follow = stickToBottom;
+            document.getElementById('replyName').textContent = 'Replying to ' + replyingTo.username;
+            document.getElementById('replyText').textContent = replyingTo.text;
+            document.getElementById('replyBar').style.display = 'flex';
+            closeActionMenu();
+            closeEmojiPicker();
+            if (follow) scrollToBottom(false); // the bar shrinks the list; keep the latest message in view
+            document.getElementById('msgInput').focus();
+        }
+
+        function clearReply() {
+            replyingTo = null;
+            document.getElementById('replyBar').style.display = 'none';
         }
 
         // Swaps a message's text span for an inline input. Enter saves,
@@ -778,13 +1207,25 @@
             const textSpan = div.querySelector('.text');
             if (textSpan) textSpan.textContent = m.text;
 
-            if (!div.querySelector('.edited-tag')) {
+            const meta = div.querySelector('.meta');
+            if (meta && !meta.querySelector('.edited-tag')) {
                 const tag = document.createElement('span');
                 tag.className = 'edited-tag';
                 tag.textContent = '(edited)';
-                div.appendChild(tag);
+                meta.appendChild(tag);
+            }
+
+            // Keep any quotes of this message in sync with the edit.
+            document.querySelectorAll('.reply-quote[data-reply-id="' + m.id + '"] .rq-text').forEach(function(el) {
+                el.textContent = clip(m.text);
+            });
+            if (replyingTo && replyingTo.id === m.id) {
+                replyingTo.text = clip(m.text);
+                document.getElementById('replyText').textContent = replyingTo.text;
             }
         }
+
+        boot();
     </script>
 </body>
 </html>
