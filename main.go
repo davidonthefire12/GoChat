@@ -55,6 +55,13 @@ type Message struct {
 	ReplyToID int64         `json:"reply_to_id,omitempty"` // client -> server: which message is being replied to
 	Reply     *ReplyPreview `json:"reply,omitempty"`       // server -> client: resolved preview of that message
 	History   []Message     `json:"history,omitempty"`
+	Members   []Member      `json:"members,omitempty"` // "presence" frames
+}
+
+// Member is one registered user and whether they currently have a live socket.
+type Member struct {
+	Username string `json:"username"`
+	Online   bool   `json:"online"`
 }
 
 const (
@@ -73,7 +80,10 @@ const (
 	replyPreviewLen = 120
 )
 
-var errNoSession = errors.New("no valid session")
+var (
+	errNoSession    = errors.New("no valid session")
+	errUserNotFound = errors.New("user not found")
+)
 
 // Client represents one connected websocket connection.
 // Every write to conn goes through the send channel and is handled by a
@@ -163,65 +173,92 @@ func (h *Hub) loadHistory(ctx context.Context) error {
 }
 
 // authenticate checks a username/password pair against the users table.
-//   - If the username has never been used before, it's registered with the
-//     given password (first-use-claims-the-name, like most simple chat apps).
-//   - If it exists, the password must match.
-//
-// Returns the canonical username (the exact casing it was originally
-// registered with - so the same identity always has one consistent casing
-// in the messages table, regardless of how it's typed on any given login),
-// whether auth succeeded, and any hard error.
+// Accounts are created by an administrator (see the "adduser" command in
+// main), never by logging in. It returns errUserNotFound for an unknown
+// username, ok=false for a wrong password, and the canonical (originally
+// registered) username casing on success.
 func (h *Hub) authenticate(ctx context.Context, username, password string) (canonical string, ok bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 
-	lower := strings.ToLower(username)
-
 	var storedUsername, hash string
 	err = h.db.QueryRowContext(ctx,
 		`SELECT username, password_hash FROM users WHERE username_lower = $1`,
-		lower,
+		strings.ToLower(username),
 	).Scan(&storedUsername, &hash)
-
-	if err == nil {
-		// Existing account - password must match.
-		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
-			return "", false, nil
-		}
-		return storedUsername, true, nil
+	if err == sql.ErrNoRows {
+		return "", false, errUserNotFound
 	}
-	if err != sql.ErrNoRows {
+	if err != nil {
 		return "", false, fmt.Errorf("lookup user: %w", err)
 	}
-
-	// No account yet for this name - register it now.
-	newHash, herr := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if herr != nil {
-		return "", false, fmt.Errorf("hash password: %w", herr)
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		return "", false, nil
 	}
-	_, ierr := h.db.ExecContext(ctx,
+	return storedUsername, true, nil
+}
+
+// addUser creates an account. Used by the "adduser" command-line mode.
+func addUser(db *sql.DB, username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" || len(username) > 30 {
+		return fmt.Errorf("username must be 1-30 characters")
+	}
+	if len(password) < minPasswordLen {
+		return fmt.Errorf("password must be at least %d characters", minPasswordLen)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+	defer cancel()
+	res, err := db.ExecContext(ctx,
 		`INSERT INTO users (username_lower, username, password_hash, created_at)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (username_lower) DO NOTHING`,
-		lower, username, string(newHash), time.Now().Unix(),
-	)
-	if ierr != nil {
-		return "", false, fmt.Errorf("register user: %w", ierr)
+		 VALUES ($1, $2, $3, $4) ON CONFLICT (username_lower) DO NOTHING`,
+		strings.ToLower(username), username, string(hash), time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("insert user: %w", err)
 	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("user %q already exists", username)
+	}
+	return nil
+}
 
-	// Re-read: if someone else won a simultaneous registration race for this
-	// exact name, this checks our password against whichever row actually landed.
-	var finalUsername, finalHash string
-	if serr := h.db.QueryRowContext(ctx,
-		`SELECT username, password_hash FROM users WHERE username_lower = $1`,
-		lower,
-	).Scan(&finalUsername, &finalHash); serr != nil {
-		return "", false, fmt.Errorf("verify registration: %w", serr)
+// broadcastPresence sends every client the full member list with online flags.
+// Called whenever someone connects or disconnects.
+func (h *Hub) broadcastPresence() {
+	h.mu.Lock()
+	online := make(map[string]bool, len(h.clients))
+	for c := range h.clients {
+		online[strings.ToLower(c.username)] = true
 	}
-	if bcrypt.CompareHashAndPassword([]byte(finalHash), []byte(password)) != nil {
-		return "", false, nil // someone else registered this name a moment earlier
+	h.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+	defer cancel()
+	rows, err := h.db.QueryContext(ctx, `SELECT username FROM users ORDER BY username_lower`)
+	if err != nil {
+		log.Printf("presence query failed: %v", err)
+		return
 	}
-	return finalUsername, true, nil
+	defer rows.Close()
+
+	var members []Member
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			log.Printf("presence scan failed: %v", err)
+			return
+		}
+		members = append(members, Member{Username: u, Online: online[strings.ToLower(u)]})
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("presence rows failed: %v", err)
+		return
+	}
+	h.broadcast(Message{Type: "presence", Members: members})
 }
 
 // previewOf truncates quoted text for the reply snippet.
@@ -553,6 +590,7 @@ func (c *Client) writePump() {
 func (c *Client) readPump(hub *Hub) {
 	defer func() {
 		hub.removeClient(c)
+		go hub.broadcastPresence()
 		log.Printf("Client disconnected: %s (%s)", c.conn.RemoteAddr(), c.username)
 	}()
 
@@ -668,8 +706,8 @@ func requirePost(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// handleLogin: POST {username, password}. Same rules as before (first use of
-// a name registers it), but on success it starts a persistent cookie session.
+// handleLogin: POST {username, password}. Existing users only: unknown names
+// are rejected, never registered. Success starts a persistent cookie session.
 func handleLogin(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	if !requirePost(w, r) {
 		return
@@ -698,6 +736,10 @@ func handleLogin(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	canonical, ok, err := hub.authenticate(r.Context(), name, req.Password)
+	if errors.Is(err, errUserNotFound) {
+		apiError(w, http.StatusUnauthorized, "User not found. Please contact the administrator.")
+		return
+	}
 	if err != nil {
 		log.Printf("auth error for %q: %v", name, err)
 		apiError(w, http.StatusInternalServerError, "Server error, please try again.")
@@ -787,6 +829,7 @@ func handleConnections(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	client.send <- Message{Type: "joined", Username: client.username}
 	client.send <- Message{Type: "history", History: hub.snapshot()}
 
+	go hub.broadcastPresence()
 	client.readPump(hub)
 }
 
@@ -830,6 +873,15 @@ func main() {
 		log.Fatal("failed to connect to database: ", err)
 	}
 	cancel()
+
+	// Account administration: `go run . adduser <username> <password>`
+	if len(os.Args) == 4 && os.Args[1] == "adduser" {
+		if err := addUser(db, os.Args[2], os.Args[3]); err != nil {
+			log.Fatal("adduser: ", err)
+		}
+		fmt.Println("Created user:", os.Args[2])
+		return
+	}
 
 	hub := newHub(db)
 	if err := hub.ensureSchema(context.Background()); err != nil {
